@@ -119,9 +119,17 @@ class LiveFaceProcessor:
                     print(f"Error renaming file {img_path}: {e}")
             time.sleep(0.01) # Small delay to yield CPU
 
+        # After all scoring and moving is done, create a .ready file
+        try:
+            ready_file = os.path.join(recognition_person_dir, '.ready')
+            with open(ready_file, 'w') as f:
+                f.write('ready')
+        except Exception as e:
+            print(f"Error creating .ready file in {recognition_person_dir}: {e}")
+
     def process_video(self, video_source):
         """Main loop to process video stream from a file or camera."""
-        results_generator = self.yolo_model.track(source=video_source, stream=True, persist=True, show=True, device=self.device)
+        results_generator = self.yolo_model.track(source=video_source, stream=True, vid_stride=1, persist=True, device=self.device, tracker='rao_tracker.yaml')
         frame_num = 0
 
         try:

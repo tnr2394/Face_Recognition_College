@@ -7,7 +7,7 @@ import cv2
 from datetime import datetime
 import json
 import glob
-
+import random
 # Placeholders for API and Discord webhook
 URL = "https://apis.lensapp.raoinfo.tech/api"
 # HEADERS = {"Authorization": "Bearer <TOKEN>", "Content-Type": "application/json"}
@@ -15,8 +15,10 @@ HEADERS = {
             'Content-Type': 'application/json',
             "Authorization": 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0aW1lIjoiMjAyNS0wNC0wMlQxMjozNDo1Ny44ODhaIiwiZXhwaXJlc0luIjoiMjAyNi0wNC0wMlQxMjozNDo1Ny44ODhaIiwiY29tcGFueV9pZCI6MSwiaWF0IjoxNzQzNTk3Mjk3fQ.vWnkVHt4vX9UOiZEY0qMYQWjNBiW_ABipgEoNzc_F-U'
         }
-DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1199985728768180234/TD4xN_jXuBiwPNX-vsaMNV9stDba9mO_jn0MQZXuGuaAm6KICYTY0Lwj4dBmW-_5Hv5j"
+DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1394232120267902976/uDzwK0ASy5EEEFtM4w3vmnVvshZQXjszPchmuKg5T8Ia9fsDHyBoa6VErwsPz9CWzIMT"
 DISCORD_WEBHOOK_UNRECOGNIZED = DISCORD_WEBHOOK
+
+GOOGLE_SHEET_API_URL = "https://script.google.com/macros/s/AKfycbye9j6E3fmdZ_b636aYcDxyVHtH7_lNgYwJHRieec1XCdL9nZlqgAWmyC2ib92qjgSz3g/exec"
 
 RECOGNITION_FOLDER = "recognition_folder"
 INACTIVITY_WAIT = 5  # seconds to wait for folder inactivity
@@ -73,7 +75,17 @@ def recognize_face(image_path):
         print("Error in recognize_face:", e)
         return { "status": False, 'image_path': image_path}
 
-def send_to_discord(result, webhook_url=None):
+def send_to_google_sheets(data):
+    try:
+        resp = requests.post(GOOGLE_SHEET_API_URL, json=data)
+        if resp.status_code == 200:
+            print("Logged to Google Sheets")
+        else:
+            print(f"Google Sheets API error: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print(f"Error sending to Google Sheets: {e}")
+
+def send_to_discord(result, webhook_url=None, tracking_id=None):
     """Send recognition result and image to Discord webhook as a rich embed with image preview above the embed."""
     if webhook_url is None:
         webhook_url = DISCORD_WEBHOOK
@@ -89,7 +101,10 @@ def send_to_discord(result, webhook_url=None):
     else:
         box_size = "N/A"
     ts = os.path.getmtime(orig_path)
-    captured_at = datetime.fromtimestamp(ts).strftime('%d %b %H:%M (%y)')
+    # For Discord: append tracking_id to timestamp
+    captured_at = datetime.fromtimestamp(ts).strftime('%d %b %H:%M')
+    if tracking_id is not None:
+        captured_at = f"{captured_at} ({tracking_id})"
     score = parse_score(orig_path)
 
     # --- Overlay recognized/unrecognized counts ---
@@ -155,6 +170,15 @@ def send_to_discord(result, webhook_url=None):
             os.remove(display_path)
         except Exception as e:
             print(f"Could not delete temp overlay file {display_path}: {e}")
+    # --- Send to Google Sheets ---
+    # For Google Sheets: do not include tracking_id in timestamp
+    sheet_data = {
+        "name": result.get("name", "Unknown"),
+        "status": "recognized" if result["status"] else "unrecognized",
+        "score": score,
+        "image_filename": os.path.basename(display_path)
+    }
+    send_to_google_sheets(sheet_data)
 
 def parse_score(filename):
     match = re.search(r'_score_([0-9]+(?:\.[0-9]+)?)', filename)
@@ -205,7 +229,13 @@ def main():
                 if not person_folder.startswith('person_'):
                     continue
                 person_dir = os.path.join(RECOGNITION_FOLDER, person_folder)
-                if not os.path.isdir(person_dir) or is_processed(person_dir):
+                tracking_id = None
+                try:
+                    tracking_id = int(person_folder.replace('person_', ''))
+                except Exception:
+                    pass
+                ready_file = os.path.join(person_dir, '.ready')
+                if not os.path.isdir(person_dir) or is_processed(person_dir) or not os.path.exists(ready_file):
                     continue
                 if not folder_inactive(person_dir):
                     continue  # Wait for inactivity
@@ -214,6 +244,7 @@ def main():
                 recognized = False
                 unrecognized_result = None
                 unrecognized_resized_path = None
+                unrecognized_tracking_id = None
                 for idx, img_path in enumerate(top_images):
                     # Check if this is a full frame image
                     is_full_frame = '_full_score_' in img_path
@@ -238,6 +269,7 @@ def main():
                             result['display_image_path'] = img_path  # Full frame for Discord display
                         else:
                             # Fallback: use full frame for both recognition and display
+                            print(f"[DEBUG] No cropped face found for {img_path}")
                             resized_path = resize_image_to_160(img_path)
                             result = recognize_face(resized_path)
                             result['orig_image_path'] = img_path
@@ -256,7 +288,7 @@ def main():
                         counts = load_counts()
                         counts['recognized'] += 1
                         save_counts(counts)
-                        send_to_discord(result, webhook_url=DISCORD_WEBHOOK)
+                        send_to_discord(result, webhook_url=DISCORD_WEBHOOK, tracking_id=tracking_id)
                         recognized = True
                         # Clean up resized image
                         resized_path = result['image_path']
@@ -271,6 +303,7 @@ def main():
                         if idx == 0:
                             unrecognized_result = result
                             unrecognized_resized_path = result['image_path']
+                            unrecognized_tracking_id = tracking_id
                         else:
                             # Clean up resized image for other unrecognized
                             resized_path = result['image_path']
@@ -285,7 +318,7 @@ def main():
                     counts = load_counts()
                     counts['unrecognized'] += 1
                     save_counts(counts)
-                    send_to_discord(unrecognized_result, webhook_url=DISCORD_WEBHOOK_UNRECOGNIZED)
+                    send_to_discord(unrecognized_result, webhook_url=DISCORD_WEBHOOK_UNRECOGNIZED, tracking_id=unrecognized_tracking_id)
                     # Clean up resized image
                     if unrecognized_resized_path and unrecognized_resized_path != unrecognized_result['orig_image_path']:
                         try:
@@ -293,6 +326,11 @@ def main():
                         except Exception as e:
                             print(f"Could not delete temp file {unrecognized_resized_path}: {e}")
                 mark_processed(person_dir)
+                # Remove the .ready file after processing
+                try:
+                    os.remove(ready_file)
+                except Exception as e:
+                    print(f"Could not delete .ready file {ready_file}: {e}")
         except Exception as e:
             print(f"Error in main loop: {e}")
         time.sleep(CHECK_INTERVAL)

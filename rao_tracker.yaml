@@ -1,0 +1,7 @@
+tracker_type: bytetrack
+track_high_thresh: 0.5         # Ensure only confident detections are used
+track_low_thresh: 0.2          # Allow fallback to weaker detections
+new_track_thresh: 0.6          # Avoid spawning new IDs easily
+match_thresh: 0.8              # Allow tracking through small position changes
+track_buffer: 60               # Give enough time for re-appearance after occlusion
+fuse_score: True
