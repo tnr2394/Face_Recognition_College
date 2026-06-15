@@ -836,6 +836,6 @@ class FaceDetectionRanker:
 
 if __name__ == '__main__':
     # video_path = 0 # for webcam
-    video_path = r'd:\AI Work\Face_Recognition_College\test_videos\Knowns.mp4'
+    video_path = r'C:\Users\raoit\Work\fight_detection\Face_Recognition_College\test_videos\Knowns.mp4'
     ranker = FaceDetectionRanker()
     ranker.run(video_path)
