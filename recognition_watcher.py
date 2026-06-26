@@ -10,7 +10,13 @@ import json
 import glob
 from collections import Counter
 
-FACE_SERVER_URL = "http://192.170.1.166:4445"
+from cooldown_state import (
+    COOLDOWN_IN_TRAINING,
+    parse_track_id_from_folder,
+    set_cooldown,
+)
+
+FACE_SERVER_URL = "http://192.170.1.114:4445"
 TRAINING_MODE_CACHE_SECONDS = 30
 _training_mode_cache = {'value': None, 'checked_at': 0}
 DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1143427649243459584/NhuVUtPoNnMBlBlBXKTKFppZiFyBOTWYbzwxSXZb5MJm-NrSK30rW4DcV3Rwx19d6rRT"
@@ -19,7 +25,7 @@ DISCORD_WEBHOOK_UNRECOGNIZED = DISCORD_WEBHOOK
 GOOGLE_SHEET_API_URL = "https://script.google.com/macros/s/AKfycbye9j6E3fmdZ_b636aYcDxyVHtH7_lNgYwJHRieec1XCdL9nZlqgAWmyC2ib92qjgSz3g/exec"
 
 RECOGNITION_FOLDER = "recognition_folder"
-FACE_IMAGE_SIZE = 160  # FaceNet expects 160x160 crops (resized in watcher at API time only)
+MAX_API_IMAGE_DIM = 1024  # cap longest side for API payload; preserve aspect ratio
 INACTIVITY_WAIT = 5  # seconds to wait for folder inactivity
 CHECK_INTERVAL = 3   # seconds between folder checks
 RECOGNITION_BATCH_SIZE = 15  # Process up to this many faces per person (same as face_recognition.py)
@@ -66,13 +72,18 @@ def is_training_mode_enabled():
     return False
 
 def encode_face_image_b64(image_path):
-    """Resize face crop to 160x160 in memory and return base64 (no temp files)."""
+    """Encode image for API — preserve aspect ratio, optional max dimension cap."""
     img = cv2.imread(image_path)
     if img is None:
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode('utf-8')
-    resized = cv2.resize(img, (FACE_IMAGE_SIZE, FACE_IMAGE_SIZE))
-    ok, buffer = cv2.imencode('.jpg', resized)
+
+    h, w = img.shape[:2]
+    scale = min(1.0, MAX_API_IMAGE_DIM / max(h, w))
+    if scale < 1.0:
+        img = cv2.resize(img, (int(w * scale), int(h * scale)))
+
+    ok, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 85])
     if not ok:
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode('utf-8')
@@ -263,26 +274,43 @@ def parse_score(filename):
     return float(match.group(1)) if match else 0.0
 
 def list_face_crop_files(person_dir):
-    """Cropped face images in a person folder (excludes full frames and dotfiles)."""
+    """Scored person crops for API; full frames kept for display."""
+    person_scored = [
+        f for f in os.listdir(person_dir)
+        if f.lower().endswith(('.jpg', '.png'))
+        and '_person_score_' in f
+        and not f.startswith('.')
+    ]
+    if person_scored:
+        return person_scored
     return [
         f for f in os.listdir(person_dir)
         if f.lower().endswith(('.jpg', '.png'))
-        and '_full' not in f
-        and '_score_' in f
+        and '_full_score_' in f
         and not f.startswith('.')
     ]
 
 def get_top_cropped_faces(person_dir, top_n=RECOGNITION_BATCH_SIZE):
-    """Return highest-OFIQ cropped face paths for API batching."""
+    """Return highest-OFIQ image paths for API batching."""
     images = list_face_crop_files(person_dir)
     scored = [(img, parse_score(img)) for img in images]
     scored.sort(key=lambda x: x[1], reverse=True)
-    print(f"[DEBUG] Sorted face crops by OFIQ score: {scored[:top_n]}")
+    print(f"[DEBUG] Sorted samples by OFIQ score: {scored[:top_n]}")
     return [os.path.join(person_dir, img) for img, _ in scored[:top_n]]
 
 def get_full_frame_for_crop(person_dir, crop_path):
-    """Find the full-frame image that matches a cropped face file."""
-    match = re.match(r'.*frame_(\d+)_score_.*', os.path.basename(crop_path))
+    """Match a person crop to its full-frame pair for Discord display."""
+    base = os.path.basename(crop_path)
+    if '_full_score_' in base:
+        return crop_path
+    match = re.match(r'.*frame_(\d+)_person_score_.*', base)
+    if match:
+        frame_num = match.group(1)
+        pattern = os.path.join(person_dir, f"frame_{frame_num}_full_score_*.jpg")
+        candidates = glob.glob(pattern)
+        if candidates:
+            return candidates[0]
+    match = re.match(r'.*frame_(\d+)_score_.*', base)
     if match:
         frame_num = match.group(1)
         pattern = os.path.join(person_dir, f"frame_{frame_num}_full_score_*.jpg")
@@ -514,6 +542,9 @@ def process_person_folder(person_dir, person_folder, tracking_id):
     if final_result.get('status'):
         counts['recognized'] += 1
         save_counts(counts)
+        if not (is_training_mode_enabled() and not COOLDOWN_IN_TRAINING):
+            employee_id = final_result.get('recognition_data', {}).get('id')
+            set_cooldown(employee_id=employee_id)
         send_to_discord(discord_result, webhook_url=DISCORD_WEBHOOK, tracking_id=tracking_id)
     else:
         counts['unrecognized'] += 1
@@ -563,11 +594,7 @@ def main():
     while True:
         try:
             for _, person_folder, person_dir, ready_file in get_pending_person_folders():
-                tracking_id = None
-                try:
-                    tracking_id = int(person_folder.replace('person_', ''))
-                except Exception:
-                    pass
+                tracking_id = parse_track_id_from_folder(person_folder)
                 if not folder_inactive(person_dir):
                     continue  # Wait for inactivity
                 print(f"Processing {person_dir}...")
