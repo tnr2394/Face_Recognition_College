@@ -30,18 +30,6 @@ INACTIVITY_WAIT = 5  # seconds to wait for folder inactivity
 CHECK_INTERVAL = 3   # seconds between folder checks
 RECOGNITION_BATCH_SIZE = 15  # Process up to this many faces per person (same as face_recognition.py)
 
-COUNTS_FILE = 'recognition_counts.json'
-
-def load_counts():
-    if not os.path.exists(COUNTS_FILE):
-        return {'recognized': 0, 'unrecognized': 0}
-    with open(COUNTS_FILE, 'r') as f:
-        return json.load(f)
-
-def save_counts(counts):
-    with open(COUNTS_FILE, 'w') as f:
-        json.dump(counts, f)
-
 def is_training_mode_enabled():
     """Read training mode from the face server (cached briefly)."""
     now = time.time()
@@ -196,24 +184,6 @@ def send_to_discord(result, webhook_url=None, tracking_id=None):
         captured_at = f"{captured_at} ({tracking_id})"
     score = parse_score(orig_path)
 
-    # --- Overlay recognized/unrecognized counts ---
-    counts = load_counts()
-    label = f"Recognized: {counts['recognized']}  Unrecognized: {counts['unrecognized']}"
-    if img is not None:
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.7
-        thickness = 2
-        margin = 10
-        (text_w, text_h), _ = cv2.getTextSize(label, font, font_scale, thickness)
-        x = width - text_w - margin
-        y = text_h + margin
-        cv2.rectangle(img, (x - 5, y - text_h - 5), (x + text_w + 5, y + 5), (0,0,0), -1)
-        cv2.putText(img, label, (x, y), font, font_scale, (255,255,255), thickness, cv2.LINE_AA)
-        # Save to a temp file for Discord
-        overlay_path = display_path + '_overlay.jpg'
-        cv2.imwrite(overlay_path, img)
-        display_path = overlay_path
-
     if result['status']:
         title = f"{result.get('name', 'Unknown')} Recognized"
         distance = result.get('distance_image', 'N/A')
@@ -253,12 +223,6 @@ def send_to_discord(result, webhook_url=None, tracking_id=None):
                 print(f"Discord webhook error: {resp.status_code} {resp.text}")
         except Exception as e:
             print(f"Error sending to Discord: {e}")
-    # Clean up temp overlay file
-    if img is not None and os.path.exists(display_path) and display_path.endswith('_overlay.jpg'):
-        try:
-            os.remove(display_path)
-        except Exception as e:
-            print(f"Could not delete temp overlay file {display_path}: {e}")
     # --- Send to Google Sheets ---
     # For Google Sheets: do not include tracking_id in timestamp
     # sheet_data = {
@@ -307,24 +271,44 @@ def get_top_cropped_faces(person_dir, top_n=RECOGNITION_BATCH_SIZE):
     return [os.path.join(person_dir, img) for img, _ in scored[:top_n]]
 
 def get_full_frame_for_crop(person_dir, crop_path):
-    """Match a person crop to its full-frame pair for Discord display."""
+    """Match a face/person crop to its full-frame pair for Discord display."""
+    if not crop_path:
+        return crop_path
+
     base = os.path.basename(crop_path)
     if '_full_score_' in base:
         return crop_path
+
+    frame_num = None
     match = re.match(r'.*frame_(\d+)_(?:face|person)_score_.*', base)
     if match:
         frame_num = match.group(1)
-        pattern = os.path.join(person_dir, f"frame_{frame_num}_full_score_*.jpg")
-        candidates = glob.glob(pattern)
-        if candidates:
-            return candidates[0]
-    match = re.match(r'.*frame_(\d+)_score_.*', base)
-    if match:
-        frame_num = match.group(1)
-        pattern = os.path.join(person_dir, f"frame_{frame_num}_full_score_*.jpg")
-        candidates = glob.glob(pattern)
-        if candidates:
-            return candidates[0]
+
+    if frame_num:
+        for pattern in (
+            os.path.join(person_dir, f"frame_{frame_num}_full_score_*.jpg"),
+            os.path.join(person_dir, f"frame_{frame_num}_full.jpg"),
+        ):
+            candidates = glob.glob(pattern)
+            if candidates:
+                return candidates[0]
+
+        manifest_path = os.path.join(person_dir, '_rank_manifest.json')
+        if os.path.isfile(manifest_path):
+            try:
+                with open(manifest_path, encoding='utf-8') as f:
+                    for entry in json.load(f).get('entries', []):
+                        if str(entry.get('frame_num')) == frame_num:
+                            full_path = entry.get('full_path')
+                            if full_path and os.path.isfile(full_path):
+                                return full_path
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    full_frame = os.path.join(person_dir, 'full_frame.jpg')
+    if os.path.isfile(full_frame):
+        return full_frame
+
     return crop_path
 
 def get_metadata_from_txt(image_path, folder_path):
@@ -433,9 +417,23 @@ def ensure_full_frame_copy(person_dir, final_result):
 
     if image_path:
         full_frame_src = get_full_frame_for_crop(person_dir, image_path)
-        if full_frame_src and os.path.isfile(full_frame_src) and full_frame_src != image_path:
-            shutil.copy2(full_frame_src, full_frame_dst)
+        if full_frame_src and os.path.isfile(full_frame_src):
+            if full_frame_src != image_path or not os.path.isfile(full_frame_dst):
+                shutil.copy2(full_frame_src, full_frame_dst)
             return
+
+    manifest_path = os.path.join(person_dir, '_rank_manifest.json')
+    if os.path.isfile(manifest_path):
+        try:
+            with open(manifest_path, encoding='utf-8') as f:
+                entries = json.load(f).get('entries', [])
+            for entry in sorted(entries, key=lambda e: tuple(e.get('rank', [])), reverse=True):
+                full_path = entry.get('full_path')
+                if full_path and os.path.isfile(full_path):
+                    shutil.copy2(full_path, full_frame_dst)
+                    return
+        except (json.JSONDecodeError, OSError):
+            pass
 
     frame_files = [f for f in os.listdir(person_dir) if '_full_score_' in f and f.endswith('.jpg')]
     if frame_files:
@@ -518,7 +516,26 @@ def build_discord_result(person_dir, final_result):
     crop_path = result.get('image_path', '')
     if crop_path:
         result['orig_image_path'] = crop_path
-        result['display_image_path'] = get_full_frame_for_crop(person_dir, crop_path)
+        display_path = get_full_frame_for_crop(person_dir, crop_path)
+        if display_path == crop_path and os.path.isfile(crop_path):
+            full_frame_dst = os.path.join(person_dir, 'full_frame.jpg')
+            if not os.path.isfile(full_frame_dst):
+                manifest_path = os.path.join(person_dir, '_rank_manifest.json')
+                if os.path.isfile(manifest_path):
+                    try:
+                        with open(manifest_path, encoding='utf-8') as f:
+                            entries = json.load(f).get('entries', [])
+                        for entry in sorted(
+                            entries, key=lambda e: tuple(e.get('rank', [])), reverse=True
+                        ):
+                            full_path = entry.get('full_path')
+                            if full_path and os.path.isfile(full_path):
+                                shutil.copy2(full_path, full_frame_dst)
+                                display_path = full_frame_dst
+                                break
+                    except (json.JSONDecodeError, OSError):
+                        pass
+        result['display_image_path'] = display_path
     return result
 
 def process_person_folder(person_dir, person_folder, tracking_id):
@@ -546,17 +563,12 @@ def process_person_folder(person_dir, person_folder, tracking_id):
     log_recognition_event(person_dir, tracking_id, person_folder, final_result)
 
     discord_result = build_discord_result(person_dir, final_result)
-    counts = load_counts()
     if final_result.get('status'):
-        counts['recognized'] += 1
-        save_counts(counts)
         if not (is_training_mode_enabled() and not COOLDOWN_IN_TRAINING):
             employee_id = final_result.get('recognition_data', {}).get('id')
             set_cooldown(employee_id=employee_id)
         send_to_discord(discord_result, webhook_url=DISCORD_WEBHOOK, tracking_id=tracking_id)
     else:
-        counts['unrecognized'] += 1
-        save_counts(counts)
         send_to_discord(discord_result, webhook_url=DISCORD_WEBHOOK_UNRECOGNIZED, tracking_id=tracking_id)
 
 def folder_inactive(person_dir, wait=INACTIVITY_WAIT):

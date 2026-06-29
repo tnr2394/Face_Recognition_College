@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import time
 
 import cv2
@@ -105,16 +106,32 @@ class FaceRankerService:
 
     def _collect_candidates(self, samples):
         candidates = []
-        stats = {"no_face": 0, "normal": 0, "lenient": 0, "fallback": 0}
+        stats = {"no_face": 0, "receding": 0, "back_facing": 0, "normal": 0, "lenient": 0, "fallback": 0}
 
         for sample in samples:
+            if sample["meta"].get("receding"):
+                stats["receding"] += 1
+                continue
+
             face, reject = self.face_engine.find_face_in_sample(
                 sample["full_frame"], sample["meta"], sample["person_crop"]
             )
+            if reject == "receding":
+                stats["receding"] += 1
+                continue
+            if reject == "back_facing":
+                stats["back_facing"] += 1
+                continue
             if reject == "no_face":
                 face, reject = self.face_engine.find_face_lenient(
                     sample["full_frame"], sample["meta"], sample["person_crop"]
                 )
+                if reject == "receding":
+                    stats["receding"] += 1
+                    continue
+                if reject == "back_facing":
+                    stats["back_facing"] += 1
+                    continue
                 if reject == "no_face":
                     stats["no_face"] += 1
                     continue
@@ -129,7 +146,7 @@ class FaceRankerService:
                 self._candidate_from_face(sample, face, tier=3, source="normal")
             )
 
-        if not candidates and self.always_export_person and samples:
+        if not candidates and self.always_export_person and samples and not self.recognition_minimal:
             fallback_samples = samples
             if self.skip_fallback_edge_bbox:
                 fallback_samples = [
@@ -212,9 +229,23 @@ class FaceRankerService:
                         f"frame_{frame_num}_face_score_{ofiq_score:.2f}_{tag}.jpg"
                     )
                     cv2.imwrite(os.path.join(out_dir, face_scored), face_crop)
+                    full_path = item.get("full_path")
+                    full_frame = cv2.imread(full_path) if full_path else None
+                    if full_frame is None and meta:
+                        batch_dir = item.get("batch_dir")
+                        if batch_dir:
+                            alt = os.path.join(
+                                batch_dir, f"frame_{frame_num}_full.jpg"
+                            )
+                            full_frame = cv2.imread(alt)
+                    if full_frame is not None:
+                        full_scored = (
+                            f"frame_{frame_num}_full_score_{ofiq_score:.2f}_{tag}.jpg"
+                        )
+                        cv2.imwrite(os.path.join(out_dir, full_scored), full_frame)
                     print(
                         f"  export frame {frame_num} [{tag}]: OFIQ={ofiq_score:.2f} "
-                        f"(face only -> recognition)"
+                        f"(face + full frame -> recognition)"
                     )
                 else:
                     print(
@@ -308,6 +339,8 @@ class FaceRankerService:
             key=lambda e: tuple(e["rank"]),
             reverse=True,
         )
+        if self.recognition_minimal:
+            sorted_entries = [e for e in sorted_entries if e.get("face_cache")]
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump({"entries": sorted_entries}, f, indent=2)
 
@@ -337,6 +370,21 @@ class FaceRankerService:
             to_export.append(item)
         self._write_exports(out_dir, to_export)
         return len(to_export), len(sorted_entries)
+
+    def _cleanup_empty_recognition_folder(self, out_dir):
+        """No face exports in API mode — drop manifest-only folders."""
+        if not self.recognition_minimal or self._folder_has_face_export(out_dir):
+            return
+        manifest_path = os.path.join(out_dir, RANK_MANIFEST)
+        if os.path.isfile(manifest_path):
+            os.remove(manifest_path)
+        cache_dir = os.path.join(out_dir, FACE_CACHE_DIR)
+        if os.path.isdir(cache_dir):
+            shutil.rmtree(cache_dir, ignore_errors=True)
+        ready_file = os.path.join(out_dir, ".ready")
+        if os.path.isfile(ready_file):
+            os.remove(ready_file)
+        print(f"No face exports for {out_dir} — removed manifest-only artifacts")
 
     def _output_dir_for_batch(self, folder_name):
         if self.merge_batches:
@@ -370,17 +418,23 @@ class FaceRankerService:
             print(
                 f"Exported {exported}/{pool_size} global best from {folder_name} -> {out_dir} "
                 f"(normal={stats['normal']}, lenient={stats['lenient']}, "
-                f"fallback={stats['fallback']}, no_face_frames={stats['no_face']})"
+                f"fallback={stats['fallback']}, receding={stats['receding']}, "
+                f"back_facing={stats['back_facing']}, no_face_frames={stats['no_face']})"
             )
         else:
             export_count = max(self.min_export, min(self.export_top_n, len(candidates)))
             to_export = candidates[:export_count]
             self._write_exports(out_dir, to_export)
+            self._cleanup_empty_recognition_folder(out_dir)
             print(
                 f"Exported {len(to_export)}/{len(candidates)} from {folder_name} -> {out_dir} "
                 f"(normal={stats['normal']}, lenient={stats['lenient']}, "
-                f"fallback={stats['fallback']}, no_face_frames={stats['no_face']})"
+                f"fallback={stats['fallback']}, receding={stats['receding']}, "
+                f"back_facing={stats['back_facing']}, no_face_frames={stats['no_face']})"
             )
+
+        if self.merge_batches:
+            self._cleanup_empty_recognition_folder(out_dir)
 
         if self.write_ready and not self.rank_only:
             if self.recognition_minimal and not self._folder_has_face_export(out_dir):

@@ -12,6 +12,10 @@ person:
   rtsp_reconnect_delay: 5
   # Skip saving when box top is below this fraction of frame height (partial person at edge).
   max_bbox_y1_ratio: 0.72
+  # Person walking away: bbox shrinks vs track peak — flag sample, face ranker ignores it.
+  receding_peak_area_ratio: 0.82
+  receding_shrink_ratio: 0.97
+  receding_shrink_frames: 2
 
 face:
   model: models/yolov8n-face-landmarks.pt
@@ -63,6 +67,9 @@ face_ranker:
   min_face_person_overlap: 0.12
   multi_face_blur_ratio: 0.35
   head_anchor_ratio: 0.12
+  skip_receding_samples: true
+  # Face center must sit in upper fraction of person box (backs / shoulders fail).
+  max_face_center_y_ratio: 0.42
   # Eye-based roll correction before OFIQ + export (not profile frontalization).
   align_faces: true
   align_max_angle_deg: 30

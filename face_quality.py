@@ -28,6 +28,8 @@ class FaceQualityEngine:
         self.min_face_person_overlap = ranker_cfg.get("min_face_person_overlap", 0.12)
         self.multi_face_blur_ratio = ranker_cfg.get("multi_face_blur_ratio", 0.35)
         self.head_anchor_ratio = ranker_cfg.get("head_anchor_ratio", 0.12)
+        self.skip_receding = ranker_cfg.get("skip_receding_samples", True)
+        self.max_face_center_y_ratio = ranker_cfg.get("max_face_center_y_ratio", 0.42)
         self.align_faces = ranker_cfg.get("align_faces", True)
         self.align_max_angle_deg = ranker_cfg.get("align_max_angle_deg", 30)
 
@@ -270,6 +272,22 @@ class FaceQualityEngine:
         if metrics.get("combined", 0) < self.gates["combined"]:
             return "low_combined"
         return None
+
+    def is_receding_sample(self, person_meta):
+        if not self.skip_receding:
+            return False
+        return bool(person_meta.get("receding"))
+
+    def is_face_in_head_region(self, face_box, person_meta):
+        """Reject faces sitting too low in the person box (typical when walking away)."""
+        y1 = person_meta.get("y1")
+        y2 = person_meta.get("y2")
+        if y1 is None or y2 is None or y2 <= y1:
+            return True
+        person_h = y2 - y1
+        face_cy = (face_box[1] + face_box[3]) / 2
+        max_y = y1 + self.max_face_center_y_ratio * person_h
+        return face_cy <= max_y
 
     def _extract_landmarks(self, detections, index):
         if not hasattr(detections, "keypoints") or detections.keypoints is None:
@@ -622,9 +640,14 @@ class FaceQualityEngine:
         Find best face for a buffered sample.
         Returns (face_dict, hard_reject) where hard_reject is only 'no_face'.
         """
+        if self.is_receding_sample(person_meta):
+            return None, "receding"
         face = self._find_face(full_frame, person_meta, person_crop)
         if face is None:
             return None, "no_face"
+        if not self.is_face_in_head_region(face["face_box"], person_meta):
+            face["gate_reject"] = "back_facing"
+            return face, "back_facing"
         if face.get("half_face"):
             face["gate_reject"] = face.get("gate_reject") or "half_face"
         else:
@@ -633,6 +656,8 @@ class FaceQualityEngine:
 
     def find_face_lenient(self, full_frame, person_meta, person_crop=None):
         """Low-threshold face search when normal detection finds nothing."""
+        if self.is_receding_sample(person_meta):
+            return None, "receding"
         lenient = self.config.get("face", {}).get("lenient", {})
         face = self._find_face(
             full_frame,
@@ -645,6 +670,9 @@ class FaceQualityEngine:
         )
         if face is None:
             return None, "no_face"
+        if not self.is_face_in_head_region(face["face_box"], person_meta):
+            face["gate_reject"] = "back_facing"
+            return face, "back_facing"
         if face.get("half_face"):
             face["gate_reject"] = face.get("gate_reject") or "half_face"
         else:

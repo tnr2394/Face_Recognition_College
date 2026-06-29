@@ -159,6 +159,9 @@ class PersonCaptureService:
         self.tracker_config = p["tracker"]
         self.person_conf = p["conf"]
         self.max_bbox_y1_ratio = p.get("max_bbox_y1_ratio", 0.72)
+        self.receding_peak_ratio = p.get("receding_peak_area_ratio", 0.82)
+        self.receding_shrink_ratio = p.get("receding_shrink_ratio", 0.97)
+        self.receding_shrink_frames = p.get("receding_shrink_frames", 2)
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.person_model = YOLO(p["model"])
@@ -199,8 +202,34 @@ class PersonCaptureService:
             if os.path.isfile(path):
                 os.remove(path)
 
-    def _save_sample(self, person_dir, frame_num, bbox, box_area, frame):
-        meta = {"x1": bbox[0], "y1": bbox[1], "x2": bbox[2], "y2": bbox[3], "area": box_area}
+    def _is_receding(self, track_id, box_area, peak_area):
+        """True when bbox is shrinking away from camera (walking backward)."""
+        if peak_area <= 0:
+            return False
+        below_peak = box_area < peak_area * self.receding_peak_ratio
+        with self._meta_lock:
+            meta = self.track_meta.get(track_id, {})
+            last_area = meta.get("last_area")
+            shrink_streak = meta.get("shrink_streak", 0)
+            if last_area and box_area < last_area * self.receding_shrink_ratio:
+                shrink_streak += 1
+            else:
+                shrink_streak = 0
+            meta["last_area"] = box_area
+            meta["shrink_streak"] = shrink_streak
+            self.track_meta[track_id] = meta
+        shrinking = shrink_streak >= self.receding_shrink_frames
+        return below_peak and shrinking
+
+    def _save_sample(self, person_dir, frame_num, bbox, box_area, frame, *, receding=False):
+        meta = {
+            "x1": bbox[0],
+            "y1": bbox[1],
+            "x2": bbox[2],
+            "y2": bbox[3],
+            "area": box_area,
+            "receding": receding,
+        }
         cv2.imwrite(os.path.join(person_dir, f"frame_{frame_num}_full.jpg"), frame)
         crop = self._crop_person(frame, meta)
         if crop.size > 0:
@@ -208,10 +237,10 @@ class PersonCaptureService:
         with open(os.path.join(person_dir, f"frame_{frame_num}_meta.json"), "w") as f:
             json.dump(meta, f)
 
-    def _store_sample(self, person_dir, frame_num, bbox, box_area, frame):
+    def _store_sample(self, person_dir, frame_num, bbox, box_area, frame, *, receding=False):
         metas = list_meta_files(person_dir)
         if len(metas) < self.max_samples:
-            self._save_sample(person_dir, frame_num, bbox, box_area, frame)
+            self._save_sample(person_dir, frame_num, bbox, box_area, frame, receding=receding)
             return True
         smallest = min(
             metas,
@@ -223,7 +252,7 @@ class PersonCaptureService:
         old_frame = frame_num_from_meta_filename(smallest)
         if old_frame:
             self._remove_sample(person_dir, old_frame)
-        self._save_sample(person_dir, frame_num, bbox, box_area, frame)
+        self._save_sample(person_dir, frame_num, bbox, box_area, frame, receding=receding)
         return True
 
     def _max_area_in_dir(self, person_dir):
@@ -335,11 +364,18 @@ class PersonCaptureService:
                         "batch": 0,
                         "peak_buffer_area": 0,
                         "peak_area_time": now,
+                        "last_area": None,
+                        "shrink_streak": 0,
                     }
+                peak_area = self.track_meta[tid].get("peak_buffer_area", 0)
+
+            receding = self._is_receding(tid, box_area, max(peak_area, box_area))
 
             staging_dir = os.path.join(self.queue_dir, f"_staging_person_{tid}")
             os.makedirs(staging_dir, exist_ok=True)
-            saved = self._store_sample(staging_dir, frame_num, (x1, y1, x2, y2), box_area, clean_frame)
+            saved = self._store_sample(
+                staging_dir, frame_num, (x1, y1, x2, y2), box_area, clean_frame, receding=receding
+            )
 
             max_area = self._max_area_in_dir(staging_dir)
             with self._meta_lock:
