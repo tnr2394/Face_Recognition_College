@@ -274,7 +274,15 @@ def parse_score(filename):
     return float(match.group(1)) if match else 0.0
 
 def list_face_crop_files(person_dir):
-    """Scored person crops for API; full frames kept for display."""
+    """Scored face crops for API; fall back to person crop, then full frame."""
+    face_scored = [
+        f for f in os.listdir(person_dir)
+        if f.lower().endswith(('.jpg', '.png'))
+        and '_face_score_' in f
+        and not f.startswith('.')
+    ]
+    if face_scored:
+        return face_scored
     person_scored = [
         f for f in os.listdir(person_dir)
         if f.lower().endswith(('.jpg', '.png'))
@@ -303,7 +311,7 @@ def get_full_frame_for_crop(person_dir, crop_path):
     base = os.path.basename(crop_path)
     if '_full_score_' in base:
         return crop_path
-    match = re.match(r'.*frame_(\d+)_person_score_.*', base)
+    match = re.match(r'.*frame_(\d+)_(?:face|person)_score_.*', base)
     if match:
         frame_num = match.group(1)
         pattern = os.path.join(person_dir, f"frame_{frame_num}_full_score_*.jpg")
@@ -587,6 +595,7 @@ def get_pending_person_folders():
     return pending
 
 def main():
+    os.makedirs(RECOGNITION_FOLDER, exist_ok=True)
     training_mode = is_training_mode_enabled()
     print(f"Face server: {FACE_SERVER_URL}")
     print(f"Mode: {'training (/extract)' if training_mode else 'search (/search)'}")

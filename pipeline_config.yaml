@@ -1,0 +1,74 @@
+person:
+  model: yolov8n.pt
+  tracker: rao_tracker.yaml
+  conf: 0.4
+  queue_dir: person_queue
+  min_box_area_ratio: 0.002
+  max_samples: 15
+  flush_interval_sec: 18
+  flush_stable_sec: 4
+  min_samples_before_flush: 1
+  vid_stride: 1
+  rtsp_reconnect_delay: 5
+  # Skip saving when box top is below this fraction of frame height (partial person at edge).
+  max_bbox_y1_ratio: 0.72
+
+face:
+  model: models/yolov8n-face-landmarks.pt
+  model_fallback: yolov8n-face-landmarks.pt
+  conf: 0.5
+  iou: 0.35
+  min_face_height_px: 36
+  lenient:
+    conf: 0.25
+    min_face_height_px: 20
+    bbox_expand_ratio: 0.25
+    reject_half_face: false
+  score_weights:
+    blur: 0.15
+    lighting: 0.1
+    size: 0.1
+    completeness: 0.2
+    frontality: 0.2
+    eyes: 0.15
+    mouth: 0.1
+  gates:
+    blur: 40
+    completeness: 40
+    frontality: 50
+    eyes: 40
+    mouth: 40
+    combined: 50
+
+ofiq:
+  model: OFIQ-MODELS/models/unified_quality_score/magface_iresnet50_norm.onnx
+  threshold: 16
+  export_top_n: 2
+  recognition_dir: recognition_folder
+
+# Stage 2 output — rank best faces per person; recognition is optional later
+face_ranker:
+  output_dir: ranked_faces
+  merge_batches_per_track: true
+  write_ready: false
+  rank_only: true
+  min_export_per_person: 1
+  always_export_person: true
+  # No person_fallback export when all samples are low-edge boxes with no face.
+  skip_fallback_edge_bbox: true
+  max_bbox_y1_ratio: 0.72
+  bbox_expand_ratio: 0.05
+  reject_half_face: true
+  max_face_area_ratio: 0.22
+  min_face_person_overlap: 0.12
+  multi_face_blur_ratio: 0.35
+  head_anchor_ratio: 0.12
+  # Eye-based roll correction before OFIQ + export (not profile frontalization).
+  align_faces: true
+  align_max_angle_deg: 30
+  # With --with-recognition: only *_face_score_*.jpg (no full/person/debug/meta).
+  recognition_minimal_export: true
+
+watcher:
+  check_interval_sec: 3
+  inactivity_wait_sec: 5
