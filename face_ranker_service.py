@@ -72,10 +72,12 @@ class FaceRankerService:
             "face_min_overlap", roi_cfg.get("min_overlap", 0.15)
         )
         self.outside_roi_dir = roi_cfg.get("outside_roi_dir", "outside_roi_faces")
+        self.rejected_dir = ranker_cfg.get("rejected_dir", "rejected_faces")
         ensure_dir(self.queue_dir)
         ensure_dir(self.output_dir)
         ensure_dir(self.low_ofiq_dir)
         ensure_dir(self.outside_roi_dir)
+        ensure_dir(self.rejected_dir)
         if self.roi:
             print(
                 f"ROI export filter: ({self.roi['x1']:.3f},{self.roi['y1']:.3f})-"
@@ -189,14 +191,32 @@ class FaceRankerService:
             if c.get("gate") == "ok" and c.get("face_crop") is not None
         ]
 
-    def _add_face_candidate(self, candidates, stats, sample, face, tier, source):
+    def _add_face_candidate(self, candidates, rejected, stats, sample, face, tier, source):
         if face.get("gate_reject"):
             stats["gated"] = stats.get("gated", 0) + 1
+            self._note_rejected_face(rejected, sample, face, face["gate_reject"])
             return
         candidates.append(self._candidate_from_face(sample, face, tier, source))
 
+    @staticmethod
+    def _note_rejected_face(rejected, sample, face, reason):
+        if face is None or face.get("face_crop") is None:
+            return
+        rejected.append(
+            {
+                "reason": reason,
+                "frame_num": sample["frame_num"],
+                "face_crop": face["face_crop"],
+                "metrics": face.get("metrics"),
+                "meta": sample["meta"],
+                "full_path": sample["full_path"],
+                "batch_dir": sample["batch_dir"],
+            }
+        )
+
     def _collect_candidates(self, samples):
         candidates = []
+        rejected = []
         stats = {
             "no_face": 0, "receding": 0, "back_facing": 0, "gated": 0,
             "normal": 0, "lenient": 0, "fallback": 0,
@@ -215,6 +235,7 @@ class FaceRankerService:
                 continue
             if reject == "back_facing":
                 stats["back_facing"] += 1
+                self._note_rejected_face(rejected, sample, face, "back_facing")
                 continue
             if reject == "no_face":
                 face, reject = self.face_engine.find_face_lenient(
@@ -225,19 +246,20 @@ class FaceRankerService:
                     continue
                 if reject == "back_facing":
                     stats["back_facing"] += 1
+                    self._note_rejected_face(rejected, sample, face, "back_facing")
                     continue
                 if reject == "no_face":
                     stats["no_face"] += 1
                     continue
                 stats["lenient"] += 1
                 self._add_face_candidate(
-                    candidates, stats, sample, face, tier=2, source="lenient"
+                    candidates, rejected, stats, sample, face, tier=2, source="lenient"
                 )
                 continue
 
             stats["normal"] += 1
             self._add_face_candidate(
-                candidates, stats, sample, face, tier=3, source="normal"
+                candidates, rejected, stats, sample, face, tier=3, source="normal"
             )
 
         if not candidates and self.always_export_person and samples and not self.recognition_minimal:
@@ -266,7 +288,7 @@ class FaceRankerService:
                     }
                 )
 
-        return candidates, stats
+        return candidates, stats, rejected
 
     def _is_edge_partial_sample(self, sample):
         full_frame = cv2.imread(os.path.abspath(sample["full_path"]))
@@ -574,6 +596,69 @@ class FaceRankerService:
         print(f"  outside ROI -> {out_dir} ({len(to_export)} face(s))")
         return len(to_export)
 
+    def _rejected_dir_for_batch(self, folder_name):
+        if self.merge_batches:
+            track_id = parse_track_id_from_folder(folder_name)
+            if track_id is not None:
+                return os.path.join(self.rejected_dir, f"person_{track_id}")
+        return os.path.join(self.rejected_dir, folder_name)
+
+    @staticmethod
+    def _format_reject_stats(stats, sample_count):
+        return (
+            f"samples={sample_count}, no_face={stats['no_face']}, "
+            f"receding={stats['receding']}, back_facing={stats['back_facing']}, "
+            f"gated={stats.get('gated', 0)}"
+        )
+
+    def _export_rejected_batch(self, batch_dir, folder_name, samples, stats, rejected):
+        """Keep a debug copy when every frame fails before export."""
+        if not samples:
+            return
+        out_dir = self._rejected_dir_for_batch(folder_name)
+        os.makedirs(out_dir, exist_ok=True)
+
+        best = max(samples, key=lambda s: s["person_area"])
+        frame_num = best["frame_num"]
+        for kind in ("full", "person"):
+            src = os.path.join(batch_dir, f"frame_{frame_num}_{kind}.jpg")
+            if os.path.isfile(src):
+                shutil.copy2(src, os.path.join(out_dir, f"frame_{frame_num}_{kind}.jpg"))
+
+        if rejected:
+            best_reject = max(
+                rejected,
+                key=lambda item: (item.get("metrics") or {}).get("combined", 0),
+            )
+            reject_frame = best_reject["frame_num"]
+            reason = best_reject["reason"]
+            cv2.imwrite(
+                os.path.join(out_dir, f"frame_{reject_frame}_face_{reason}.jpg"),
+                best_reject["face_crop"],
+            )
+
+        summary = {
+            "batch": folder_name,
+            "queue_dir": os.path.abspath(batch_dir),
+            "stats": stats,
+            "best_sample_frame": frame_num,
+            "rejected_face_attempts": [
+                {
+                    "frame": item["frame_num"],
+                    "reason": item["reason"],
+                    "metrics": item.get("metrics"),
+                }
+                for item in rejected
+            ],
+        }
+        with open(os.path.join(out_dir, "_reject_summary.json"), "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+
+        print(
+            f"  rejected -> {out_dir} "
+            f"({self._format_reject_stats(stats, len(samples))})"
+        )
+
     def _output_dir_for_batch(self, folder_name):
         if self.merge_batches:
             track_id = parse_track_id_from_folder(folder_name)
@@ -592,9 +677,14 @@ class FaceRankerService:
             print(f"No samples in {folder_name}")
             return False
 
-        candidates, stats = self._collect_candidates(samples)
+        candidates, stats, rejected = self._collect_candidates(samples)
         if not candidates:
-            print(f"No export for {folder_name} (empty batch)")
+            self._export_rejected_batch(batch_dir, folder_name, samples, stats, rejected)
+            print(
+                f"No export for {folder_name}: {self._format_reject_stats(stats, len(samples))}. "
+                f"Raw captures remain in {batch_dir}; debug copy in "
+                f"{self._rejected_dir_for_batch(folder_name)}/"
+            )
             return False
 
         candidates.sort(key=lambda c: c["rank"], reverse=True)

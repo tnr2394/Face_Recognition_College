@@ -100,9 +100,11 @@ def main():
         recognition_dir = config.get("ofiq", {}).get("recognition_dir", "recognition_folder")
         low_ofiq_dir = config.get("ofiq", {}).get("low_ofiq_dir", "low_ofiq_faces")
         outside_roi_dir = config.get("roi", {}).get("outside_roi_dir", "outside_roi_faces")
+        rejected_dir = config.get("face_ranker", {}).get("rejected_dir", "rejected_faces")
         os.makedirs(recognition_dir, exist_ok=True)
         os.makedirs(low_ofiq_dir, exist_ok=True)
         os.makedirs(outside_roi_dir, exist_ok=True)
+        os.makedirs(rejected_dir, exist_ok=True)
         print("Mode: full pipeline (capture + rank -> recognition_folder + API)")
     else:
         print("Mode: detect only (capture + rank -> ranked_faces/)")

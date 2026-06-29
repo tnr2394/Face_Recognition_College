@@ -78,6 +78,7 @@ face_ranker:
   min_eyes_back: 42
   min_face_to_person_area: 0.05
   export_only_passing_gates: true
+  rejected_dir: rejected_faces
   # Eye-based roll correction before OFIQ + export (not profile frontalization).
   align_faces: true
   align_max_angle_deg: 30
