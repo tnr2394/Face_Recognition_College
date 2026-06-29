@@ -92,5 +92,6 @@ watcher:
 roi:
   enabled: true
   file: roi.json
+  outside_roi_dir: outside_roi_faces
   face_mode: overlap
   face_min_overlap: 0.15

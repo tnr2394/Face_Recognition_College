@@ -3,6 +3,7 @@ person_queue/
 ranked_faces/
 recognition_folder/
 low_ofiq_faces/
+outside_roi_faces/
 live_results/
 results/
 recognition_cooldown.json

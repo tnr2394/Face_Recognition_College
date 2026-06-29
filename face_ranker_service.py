@@ -71,9 +71,11 @@ class FaceRankerService:
         self.roi_face_min_overlap = roi_cfg.get(
             "face_min_overlap", roi_cfg.get("min_overlap", 0.15)
         )
+        self.outside_roi_dir = roi_cfg.get("outside_roi_dir", "outside_roi_faces")
         ensure_dir(self.queue_dir)
         ensure_dir(self.output_dir)
         ensure_dir(self.low_ofiq_dir)
+        ensure_dir(self.outside_roi_dir)
         if self.roi:
             print(
                 f"ROI export filter: ({self.roi['x1']:.3f},{self.roi['y1']:.3f})-"
@@ -167,15 +169,17 @@ class FaceRankerService:
 
     def _filter_candidates_by_roi(self, candidates):
         if not self.roi:
-            return candidates, 0
+            return candidates, []
         kept = [c for c in candidates if self._candidate_in_roi(c)]
-        return kept, len(candidates) - len(kept)
+        outside = [c for c in candidates if c not in kept]
+        return kept, outside
 
     def _filter_entries_by_roi(self, entries):
         if not self.roi:
-            return entries, 0
+            return entries, []
         kept = [e for e in entries if self._entry_in_roi(e)]
-        return kept, len(entries) - len(kept)
+        outside = [e for e in entries if e not in kept]
+        return kept, outside
 
     def _exportable_candidates(self, candidates):
         if not self.export_only_passing_gates:
@@ -411,7 +415,7 @@ class FaceRankerService:
         }
 
 
-    def _accumulate_and_export_merged(self, out_dir, new_candidates):
+    def _accumulate_and_export_merged(self, out_dir, new_candidates, folder_name):
         """Merge candidates across batches and export global top-N for this track."""
         manifest_path = os.path.join(out_dir, RANK_MANIFEST)
         entries_by_frame = {}
@@ -440,7 +444,7 @@ class FaceRankerService:
         else:
             export_pool = sorted_entries
 
-        roi_entries, outside_roi = self._filter_entries_by_roi(export_pool)
+        roi_entries, outside_entries = self._filter_entries_by_roi(export_pool)
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump({"entries": sorted_entries}, f, indent=2)
 
@@ -469,7 +473,10 @@ class FaceRankerService:
                     item["face_crop"] = cv2.imread(cache_path)
             to_export.append(item)
         self._write_exports(out_dir, to_export)
-        return len(to_export), len(sorted_entries), outside_roi
+        outside_roi_n = self._export_outside_roi(
+            outside_entries, folder_name, cache_root=out_dir, from_entries=True
+        )
+        return len(to_export), len(sorted_entries), outside_roi_n
 
     def _cleanup_empty_recognition_folder(self, out_dir):
         """No face exports in API mode — drop manifest-only folders."""
@@ -517,6 +524,56 @@ class FaceRankerService:
         )
         return len(to_export)
 
+    def _outside_roi_dir_for_batch(self, folder_name):
+        if self.merge_batches:
+            track_id = parse_track_id_from_folder(folder_name)
+            if track_id is not None:
+                return os.path.join(self.outside_roi_dir, f"person_{track_id}")
+        return os.path.join(self.outside_roi_dir, folder_name)
+
+    def _export_outside_roi(self, outside, folder_name, *, cache_root=None, from_entries=False):
+        """Save passing faces outside ROI (no .ready / no watcher)."""
+        if not outside or not self.roi or not folder_name:
+            return 0
+
+        items = []
+        if from_entries:
+            for entry in outside:
+                item = {
+                    "rank": tuple(entry["rank"]),
+                    "ofiq": entry["ofiq"],
+                    "combined": entry["combined"],
+                    "gate": entry["gate"],
+                    "source": entry["source"],
+                    "frame_num": entry["frame_num"],
+                    "meta": entry["meta"],
+                    "full_path": entry["full_path"],
+                    "face_crop": None,
+                }
+                if entry.get("face_cache") and cache_root:
+                    cache_path = os.path.join(cache_root, entry["face_cache"])
+                    if os.path.isfile(cache_path):
+                        item["face_crop"] = cv2.imread(cache_path)
+                if item["face_crop"] is not None:
+                    items.append(item)
+        else:
+            items = [c for c in outside if c.get("face_crop") is not None]
+
+        if not items:
+            return 0
+
+        items.sort(key=lambda c: c["rank"], reverse=True)
+        out_dir = self._outside_roi_dir_for_batch(folder_name)
+        os.makedirs(out_dir, exist_ok=True)
+        export_count = max(
+            self.min_export,
+            min(self.export_top_n, len(items)),
+        )
+        to_export = items[:export_count]
+        self._write_exports(out_dir, to_export)
+        print(f"  outside ROI -> {out_dir} ({len(to_export)} face(s))")
+        return len(to_export)
+
     def _output_dir_for_batch(self, folder_name):
         if self.merge_batches:
             track_id = parse_track_id_from_folder(folder_name)
@@ -542,28 +599,28 @@ class FaceRankerService:
 
         candidates.sort(key=lambda c: c["rank"], reverse=True)
         export_pool = self._exportable_candidates(candidates)
-        roi_candidates, outside_roi = self._filter_candidates_by_roi(export_pool)
+        roi_candidates, outside_candidates = self._filter_candidates_by_roi(export_pool)
         out_dir = self._output_dir_for_batch(folder_name)
         os.makedirs(out_dir, exist_ok=True)
 
         if self.merge_batches:
-            exported, pool_size, batch_outside = self._accumulate_and_export_merged(
-                out_dir, candidates
+            exported, pool_size, outside_roi_n = self._accumulate_and_export_merged(
+                out_dir, candidates, folder_name
             )
-            outside_roi = batch_outside
             low_ofiq_n = self._export_below_ofiq(candidates, folder_name)
             print(
                 f"Exported {exported}/{pool_size} global best from {folder_name} -> {out_dir} "
                 f"(normal={stats['normal']}, lenient={stats['lenient']}, "
                 f"fallback={stats['fallback']}, receding={stats['receding']}, "
                 f"back_facing={stats['back_facing']}, gated={stats.get('gated', 0)}, "
-                f"outside_roi={outside_roi}, below_ofiq={low_ofiq_n}, "
+                f"outside_roi={outside_roi_n}, below_ofiq={low_ofiq_n}, "
                 f"no_face_frames={stats['no_face']})"
             )
         else:
             export_count = max(self.min_export, min(self.export_top_n, len(roi_candidates)))
             to_export = roi_candidates[:export_count]
             self._write_exports(out_dir, to_export)
+            outside_roi_n = self._export_outside_roi(outside_candidates, folder_name)
             low_ofiq_n = self._export_below_ofiq(candidates, folder_name)
             self._cleanup_empty_recognition_folder(out_dir)
             print(
@@ -571,7 +628,7 @@ class FaceRankerService:
                 f"(normal={stats['normal']}, lenient={stats['lenient']}, "
                 f"fallback={stats['fallback']}, receding={stats['receding']}, "
                 f"back_facing={stats['back_facing']}, gated={stats.get('gated', 0)}, "
-                f"outside_roi={outside_roi}, below_ofiq={low_ofiq_n}, "
+                f"outside_roi={outside_roi_n}, below_ofiq={low_ofiq_n}, "
                 f"no_face_frames={stats['no_face']})"
             )
 
