@@ -163,3 +163,94 @@ def count_pending_batches(queue_dir):
 
 def ensure_dir(path):
     Path(path).mkdir(parents=True, exist_ok=True)
+
+
+def roi_config_path(config):
+    roi_cfg = config.get("roi") or {}
+    return roi_cfg.get("file", "roi.json")
+
+
+def is_roi_active(config=None):
+    """ROI is on when enabled in config or in roi.json."""
+    if config is None:
+        config = load_config()
+    roi_cfg = config.get("roi") or {}
+    if roi_cfg.get("enabled"):
+        return True
+    roi_path = roi_config_path(config)
+    if not os.path.isfile(roi_path):
+        return False
+    try:
+        with open(roi_path, encoding="utf-8") as f:
+            return bool(json.load(f).get("enabled"))
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
+def load_roi(config=None, path=None):
+    """Load ROI dict from JSON. Returns None if missing or inactive."""
+    if config is None:
+        config = load_config()
+    if not is_roi_active(config):
+        return None
+    roi_path = path or roi_config_path(config)
+    if not os.path.isfile(roi_path):
+        return None
+    try:
+        with open(roi_path, encoding="utf-8") as f:
+            roi = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    for key in ("x1", "y1", "x2", "y2"):
+        if key not in roi:
+            return None
+    roi["enabled"] = True
+    return roi
+
+
+def save_roi(roi, path=None, config=None):
+    if config is None:
+        config = load_config()
+    roi_path = path or roi_config_path(config)
+    ensure_dir(os.path.dirname(roi_path) or ".")
+    with open(roi_path, "w", encoding="utf-8") as f:
+        json.dump(roi, f, indent=2)
+    print(f"Saved ROI to {roi_path}")
+
+
+def roi_pixel_bounds(roi, frame_w, frame_h):
+    if not roi:
+        return None
+    x1 = int(min(roi["x1"], roi["x2"]) * frame_w)
+    y1 = int(min(roi["y1"], roi["y2"]) * frame_h)
+    x2 = int(max(roi["x1"], roi["x2"]) * frame_w)
+    y2 = int(max(roi["y1"], roi["y2"]) * frame_h)
+    return clamp_bbox(x1, y1, x2, y2, frame_w, frame_h)
+
+
+def face_in_roi(face_box, frame_w, frame_h, roi, *, mode="center", min_overlap=0.5):
+    """Return True if ROI is off or the face satisfies the ROI rule."""
+    return bbox_in_roi(
+        face_box,
+        frame_w,
+        frame_h,
+        roi,
+        mode=mode,
+        min_overlap=min_overlap,
+        anchor_y=0.5,
+    )
+
+
+def bbox_in_roi(bbox, frame_w, frame_h, roi, *, mode="center", min_overlap=0.5, anchor_y=0.5):
+    """Check person/face bbox against ROI. anchor_y: 0=top, 0.5=center, 1=bottom of box."""
+    if not roi:
+        return True
+    bounds = roi_pixel_bounds(roi, frame_w, frame_h)
+    if bounds is None:
+        return True
+    if mode == "overlap":
+        return bbox_intersection_over_face(bbox, bounds) >= min_overlap
+    x1, y1, x2, y2 = bbox
+    cx = (x1 + x2) / 2
+    cy = y1 + anchor_y * (y2 - y1)
+    return point_inside_bbox(cx, cy, bounds)

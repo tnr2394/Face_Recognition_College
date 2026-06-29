@@ -77,6 +77,11 @@ def main():
         action="store_true",
         help="Also start recognition_watcher.py (API + Discord)",
     )
+    parser.add_argument(
+        "--draw-roi",
+        action="store_true",
+        help="Draw ROI on first frame before capture (saves roi.json)",
+    )
     args = parser.parse_args()
 
     signal.signal(signal.SIGINT, _shutdown)
@@ -105,6 +110,8 @@ def main():
                 full_cmd.append(args.video_source)
             if args.no_show:
                 full_cmd.append("--no-show")
+            if args.draw_roi:
+                full_cmd.append("--draw-roi")
         print(f"Starting {name}: {' '.join(full_cmd)}")
         proc = subprocess.Popen(full_cmd, env=child_env)
         _processes[name] = proc

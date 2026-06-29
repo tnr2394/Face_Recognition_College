@@ -172,6 +172,21 @@ class PersonCaptureService:
         ensure_dir(self.queue_dir)
         print(f"Person capture on {self.device}, queue: {self.queue_dir}")
 
+    def _prepare_roi(self, video_source, draw_roi=False):
+        if not draw_roi:
+            return
+        from draw_roi import draw_roi_interactive, grab_first_frame
+
+        frame = grab_first_frame(video_source)
+        roi = draw_roi_interactive(frame)
+        if roi is None:
+            print("ROI draw cancelled.")
+            return
+        roi_path = (self.config.get("roi") or {}).get("file", "roi.json")
+        from pipeline_io import save_roi
+
+        save_roi(roi, path=roi_path, config=self.config)
+
     def _tracker_kwargs(self, show=True, stream=True):
         return dict(
             stream=stream,
@@ -357,6 +372,8 @@ class PersonCaptureService:
             if y1 > fh * self.max_bbox_y1_ratio:
                 continue
 
+            person_bbox = (x1, y1, x2, y2)
+
             with self._meta_lock:
                 if tid not in self.track_meta:
                     self.track_meta[tid] = {
@@ -374,7 +391,12 @@ class PersonCaptureService:
             staging_dir = os.path.join(self.queue_dir, f"_staging_person_{tid}")
             os.makedirs(staging_dir, exist_ok=True)
             saved = self._store_sample(
-                staging_dir, frame_num, (x1, y1, x2, y2), box_area, clean_frame, receding=receding
+                staging_dir,
+                frame_num,
+                person_bbox,
+                box_area,
+                clean_frame,
+                receding=receding,
             )
 
             max_area = self._max_area_in_dir(staging_dir)
@@ -465,7 +487,8 @@ class PersonCaptureService:
         for track_id in list(self.active_track_ids):
             self._flush_track(int(track_id), reason="final")
 
-    def run(self, video_source, show=True):
+    def run(self, video_source, show=True, draw_roi=False):
+        self._prepare_roi(video_source, draw_roi=draw_roi)
         play_source, rotation, is_rtsp = parse_video_source(video_source)
         try:
             if is_rtsp:
@@ -495,13 +518,20 @@ def main():
         help="RTSP URL, video file, webcam index",
     )
     parser.add_argument("--no-show", action="store_true")
+    parser.add_argument(
+        "--draw-roi",
+        action="store_true",
+        help="Draw ROI on first frame before capture (saves roi.json)",
+    )
     args = parser.parse_args()
 
     if not is_valid_video_source(args.video_source):
         print(f"Invalid source: {args.video_source}")
         return
 
-    PersonCaptureService().run(args.video_source, show=not args.no_show)
+    PersonCaptureService().run(
+        args.video_source, show=not args.no_show, draw_roi=args.draw_roi
+    )
 
 
 if __name__ == "__main__":

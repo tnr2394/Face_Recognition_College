@@ -46,3 +46,25 @@ Edit `pipeline_config.yaml`. Key flags:
 - `person_queue/` — capture handoff batches
 - `ranked_faces/` — debug exports (detect-only mode)
 - `recognition_folder/` — API handoff (recognition mode)
+
+## ROI (region of interest)
+
+ROI is applied **after face ranking** — all people are captured and faces are scored, then only ranked faces inside the ROI are exported.
+
+1. Draw ROI:
+
+```bash
+python draw_roi.py rtsp://your-camera-url
+```
+
+2. Enable in `pipeline_config.yaml`:
+
+```yaml
+roi:
+  enabled: true
+  file: roi.json
+  face_mode: overlap
+  face_min_overlap: 0.15
+```
+
+Ranker logs include `outside_roi` for faces ranked but not exported.

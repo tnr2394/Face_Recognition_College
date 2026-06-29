@@ -79,3 +79,10 @@ face_ranker:
 watcher:
   check_interval_sec: 3
   inactivity_wait_sec: 5
+
+# Applied after face ranking — only top-ranked faces inside ROI are exported.
+roi:
+  enabled: true
+  file: roi.json
+  face_mode: overlap
+  face_min_overlap: 0.15
