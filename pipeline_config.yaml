@@ -52,6 +52,7 @@ ofiq:
   threshold: 16
   export_top_n: 2
   recognition_dir: recognition_folder
+  low_ofiq_dir: low_ofiq_faces
 
 # Stage 2 output — rank best faces per person; recognition is optional later
 face_ranker:

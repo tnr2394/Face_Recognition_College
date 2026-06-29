@@ -98,7 +98,9 @@ def main():
     if args.with_recognition:
         child_env["PIPELINE_RECOGNITION_MODE"] = "1"
         recognition_dir = config.get("ofiq", {}).get("recognition_dir", "recognition_folder")
+        low_ofiq_dir = config.get("ofiq", {}).get("low_ofiq_dir", "low_ofiq_faces")
         os.makedirs(recognition_dir, exist_ok=True)
+        os.makedirs(low_ofiq_dir, exist_ok=True)
         print("Mode: full pipeline (capture + rank -> recognition_folder + API)")
     else:
         print("Mode: detect only (capture + rank -> ranked_faces/)")

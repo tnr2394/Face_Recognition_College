@@ -57,6 +57,7 @@ class FaceRankerService:
             "max_bbox_y1_ratio", self.config["person"].get("max_bbox_y1_ratio", 0.72)
         )
         self.ofiq_threshold = ofiq_cfg["threshold"]
+        self.low_ofiq_dir = ofiq_cfg.get("low_ofiq_dir", "low_ofiq_faces")
         self.export_top_n = ofiq_cfg["export_top_n"]
         self.check_interval = watcher_cfg.get("check_interval_sec", 3)
         self.inactivity_wait = watcher_cfg.get("inactivity_wait_sec", 5)
@@ -72,6 +73,7 @@ class FaceRankerService:
         )
         ensure_dir(self.queue_dir)
         ensure_dir(self.output_dir)
+        ensure_dir(self.low_ofiq_dir)
         if self.roi:
             print(
                 f"ROI export filter: ({self.roi['x1']:.3f},{self.roi['y1']:.3f})-"
@@ -484,6 +486,37 @@ class FaceRankerService:
             os.remove(ready_file)
         print(f"No face exports for {out_dir} — removed manifest-only artifacts")
 
+    def _low_ofiq_dir_for_batch(self, folder_name):
+        if self.merge_batches:
+            track_id = parse_track_id_from_folder(folder_name)
+            if track_id is not None:
+                return os.path.join(self.low_ofiq_dir, f"person_{track_id}")
+        return os.path.join(self.low_ofiq_dir, folder_name)
+
+    def _export_below_ofiq(self, candidates, folder_name):
+        """Save sub-threshold faces to low_ofiq_dir (no .ready / no watcher)."""
+        below = [
+            c
+            for c in candidates
+            if c.get("gate") == "below_ofiq" and c.get("face_crop") is not None
+        ]
+        if not below:
+            return 0
+        below.sort(key=lambda c: c["rank"], reverse=True)
+        out_dir = self._low_ofiq_dir_for_batch(folder_name)
+        os.makedirs(out_dir, exist_ok=True)
+        export_count = max(
+            self.min_export,
+            min(self.export_top_n, len(below)),
+        )
+        to_export = below[:export_count]
+        self._write_exports(out_dir, to_export)
+        print(
+            f"  below OFIQ (<= {self.ofiq_threshold}) -> {out_dir} "
+            f"({len(to_export)} face(s))"
+        )
+        return len(to_export)
+
     def _output_dir_for_batch(self, folder_name):
         if self.merge_batches:
             track_id = parse_track_id_from_folder(folder_name)
@@ -518,24 +551,28 @@ class FaceRankerService:
                 out_dir, candidates
             )
             outside_roi = batch_outside
+            low_ofiq_n = self._export_below_ofiq(candidates, folder_name)
             print(
                 f"Exported {exported}/{pool_size} global best from {folder_name} -> {out_dir} "
                 f"(normal={stats['normal']}, lenient={stats['lenient']}, "
                 f"fallback={stats['fallback']}, receding={stats['receding']}, "
                 f"back_facing={stats['back_facing']}, gated={stats.get('gated', 0)}, "
-                f"outside_roi={outside_roi}, no_face_frames={stats['no_face']})"
+                f"outside_roi={outside_roi}, below_ofiq={low_ofiq_n}, "
+                f"no_face_frames={stats['no_face']})"
             )
         else:
             export_count = max(self.min_export, min(self.export_top_n, len(roi_candidates)))
             to_export = roi_candidates[:export_count]
             self._write_exports(out_dir, to_export)
+            low_ofiq_n = self._export_below_ofiq(candidates, folder_name)
             self._cleanup_empty_recognition_folder(out_dir)
             print(
                 f"Exported {len(to_export)}/{len(candidates)} from {folder_name} -> {out_dir} "
                 f"(normal={stats['normal']}, lenient={stats['lenient']}, "
                 f"fallback={stats['fallback']}, receding={stats['receding']}, "
                 f"back_facing={stats['back_facing']}, gated={stats.get('gated', 0)}, "
-                f"outside_roi={outside_roi}, no_face_frames={stats['no_face']})"
+                f"outside_roi={outside_roi}, below_ofiq={low_ofiq_n}, "
+                f"no_face_frames={stats['no_face']})"
             )
 
         if self.merge_batches:

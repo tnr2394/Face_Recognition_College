@@ -15,6 +15,7 @@ from cooldown_state import (
     parse_track_id_from_folder,
     set_cooldown,
 )
+from pipeline_io import load_config
 
 FACE_SERVER_URL = "http://192.170.1.114:4445"
 TRAINING_MODE_CACHE_SECONDS = 30
@@ -25,6 +26,7 @@ DISCORD_WEBHOOK_UNRECOGNIZED = DISCORD_WEBHOOK
 GOOGLE_SHEET_API_URL = "https://script.google.com/macros/s/AKfycbye9j6E3fmdZ_b636aYcDxyVHtH7_lNgYwJHRieec1XCdL9nZlqgAWmyC2ib92qjgSz3g/exec"
 
 RECOGNITION_FOLDER = "recognition_folder"
+LOW_OFIQ_FOLDER = "low_ofiq_faces"
 MAX_API_IMAGE_DIM = 1024  # cap longest side for API payload; preserve aspect ratio
 INACTIVITY_WAIT = 5  # seconds to wait for folder inactivity
 CHECK_INTERVAL = 3   # seconds between folder checks
@@ -261,6 +263,29 @@ def list_face_crop_files(person_dir):
         and '_full_score_' in f
         and not f.startswith('.')
     ]
+
+def get_ofiq_threshold():
+    return load_config().get("ofiq", {}).get("threshold", 16)
+
+def get_low_ofiq_folder():
+    return load_config().get("ofiq", {}).get("low_ofiq_dir", LOW_OFIQ_FOLDER)
+
+def folder_max_ofiq_score(person_dir):
+    scores = [parse_score(f) for f in list_face_crop_files(person_dir)]
+    return max(scores) if scores else 0.0
+
+def relocate_to_low_ofiq(person_dir, person_folder):
+    """Move a recognition handoff folder to low_ofiq_faces/ (no API / Discord)."""
+    dest_root = os.path.join(get_low_ofiq_folder(), person_folder)
+    os.makedirs(get_low_ofiq_folder(), exist_ok=True)
+    ready_file = os.path.join(person_dir, ".ready")
+    if os.path.isfile(ready_file):
+        os.remove(ready_file)
+    if os.path.isdir(dest_root):
+        shutil.rmtree(dest_root)
+    shutil.move(person_dir, dest_root)
+    print(f"Moved {person_folder} -> {dest_root} (OFIQ below threshold)")
+    return dest_root
 
 def get_top_cropped_faces(person_dir, top_n=RECOGNITION_BATCH_SIZE):
     """Return highest-OFIQ image paths for API batching."""
@@ -543,6 +568,20 @@ def process_person_folder(person_dir, person_folder, tracking_id):
     face_files = get_top_cropped_faces(person_dir, RECOGNITION_BATCH_SIZE)
     if not face_files:
         print(f"Person {tracking_id} has no face crops, skipping")
+        return
+
+    threshold = get_ofiq_threshold()
+    max_score = folder_max_ofiq_score(person_dir)
+    if max_score <= threshold:
+        print(
+            f"Person {tracking_id} max OFIQ {max_score:.2f} <= {threshold} — "
+            f"no API/Discord, moving to {get_low_ofiq_folder()}/"
+        )
+        relocate_to_low_ofiq(person_dir, person_folder)
+        mark_processed(os.path.join(get_low_ofiq_folder(), person_folder))
+        ready_file = os.path.join(RECOGNITION_FOLDER, person_folder, ".ready")
+        if os.path.isfile(ready_file):
+            os.remove(ready_file)
         return
 
     training_mode = is_training_mode_enabled()
