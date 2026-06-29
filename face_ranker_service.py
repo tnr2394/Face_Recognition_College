@@ -60,6 +60,7 @@ class FaceRankerService:
         self.export_top_n = ofiq_cfg["export_top_n"]
         self.check_interval = watcher_cfg.get("check_interval_sec", 3)
         self.inactivity_wait = watcher_cfg.get("inactivity_wait_sec", 5)
+        self.export_only_passing_gates = ranker_cfg.get("export_only_passing_gates", True)
 
         self.ofiq = OFIQScorer(ofiq_cfg["model"])
         self.face_engine = FaceQualityEngine(self.config, ofiq_scorer=self.ofiq)
@@ -174,9 +175,26 @@ class FaceRankerService:
         kept = [e for e in entries if self._entry_in_roi(e)]
         return kept, len(entries) - len(kept)
 
+    def _exportable_candidates(self, candidates):
+        if not self.export_only_passing_gates:
+            return [c for c in candidates if c.get("face_crop") is not None]
+        return [
+            c for c in candidates
+            if c.get("gate") == "ok" and c.get("face_crop") is not None
+        ]
+
+    def _add_face_candidate(self, candidates, stats, sample, face, tier, source):
+        if face.get("gate_reject"):
+            stats["gated"] = stats.get("gated", 0) + 1
+            return
+        candidates.append(self._candidate_from_face(sample, face, tier, source))
+
     def _collect_candidates(self, samples):
         candidates = []
-        stats = {"no_face": 0, "receding": 0, "back_facing": 0, "normal": 0, "lenient": 0, "fallback": 0}
+        stats = {
+            "no_face": 0, "receding": 0, "back_facing": 0, "gated": 0,
+            "normal": 0, "lenient": 0, "fallback": 0,
+        }
 
         for sample in samples:
             if sample["meta"].get("receding"):
@@ -206,14 +224,14 @@ class FaceRankerService:
                     stats["no_face"] += 1
                     continue
                 stats["lenient"] += 1
-                candidates.append(
-                    self._candidate_from_face(sample, face, tier=2, source="lenient")
+                self._add_face_candidate(
+                    candidates, stats, sample, face, tier=2, source="lenient"
                 )
                 continue
 
             stats["normal"] += 1
-            candidates.append(
-                self._candidate_from_face(sample, face, tier=3, source="normal")
+            self._add_face_candidate(
+                candidates, stats, sample, face, tier=3, source="normal"
             )
 
         if not candidates and self.always_export_person and samples and not self.recognition_minimal:
@@ -415,7 +433,12 @@ class FaceRankerService:
         if self.recognition_minimal:
             sorted_entries = [e for e in sorted_entries if e.get("face_cache")]
 
-        roi_entries, outside_roi = self._filter_entries_by_roi(sorted_entries)
+        if self.export_only_passing_gates:
+            export_pool = [e for e in sorted_entries if e.get("gate") == "ok"]
+        else:
+            export_pool = sorted_entries
+
+        roi_entries, outside_roi = self._filter_entries_by_roi(export_pool)
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump({"entries": sorted_entries}, f, indent=2)
 
@@ -485,7 +508,8 @@ class FaceRankerService:
             return False
 
         candidates.sort(key=lambda c: c["rank"], reverse=True)
-        roi_candidates, outside_roi = self._filter_candidates_by_roi(candidates)
+        export_pool = self._exportable_candidates(candidates)
+        roi_candidates, outside_roi = self._filter_candidates_by_roi(export_pool)
         out_dir = self._output_dir_for_batch(folder_name)
         os.makedirs(out_dir, exist_ok=True)
 
@@ -498,8 +522,8 @@ class FaceRankerService:
                 f"Exported {exported}/{pool_size} global best from {folder_name} -> {out_dir} "
                 f"(normal={stats['normal']}, lenient={stats['lenient']}, "
                 f"fallback={stats['fallback']}, receding={stats['receding']}, "
-                f"back_facing={stats['back_facing']}, outside_roi={outside_roi}, "
-                f"no_face_frames={stats['no_face']})"
+                f"back_facing={stats['back_facing']}, gated={stats.get('gated', 0)}, "
+                f"outside_roi={outside_roi}, no_face_frames={stats['no_face']})"
             )
         else:
             export_count = max(self.min_export, min(self.export_top_n, len(roi_candidates)))
@@ -510,8 +534,8 @@ class FaceRankerService:
                 f"Exported {len(to_export)}/{len(candidates)} from {folder_name} -> {out_dir} "
                 f"(normal={stats['normal']}, lenient={stats['lenient']}, "
                 f"fallback={stats['fallback']}, receding={stats['receding']}, "
-                f"back_facing={stats['back_facing']}, outside_roi={outside_roi}, "
-                f"no_face_frames={stats['no_face']})"
+                f"back_facing={stats['back_facing']}, gated={stats.get('gated', 0)}, "
+                f"outside_roi={outside_roi}, no_face_frames={stats['no_face']})"
             )
 
         if self.merge_batches:

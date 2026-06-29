@@ -29,7 +29,10 @@ class FaceQualityEngine:
         self.multi_face_blur_ratio = ranker_cfg.get("multi_face_blur_ratio", 0.35)
         self.head_anchor_ratio = ranker_cfg.get("head_anchor_ratio", 0.12)
         self.skip_receding = ranker_cfg.get("skip_receding_samples", True)
-        self.max_face_center_y_ratio = ranker_cfg.get("max_face_center_y_ratio", 0.42)
+        self.max_face_center_y_ratio = ranker_cfg.get("max_face_center_y_ratio", 0.38)
+        self.min_frontality_back = ranker_cfg.get("min_frontality_back", 55)
+        self.min_eyes_back = ranker_cfg.get("min_eyes_back", 42)
+        self.min_face_to_person_area = ranker_cfg.get("min_face_to_person_area", 0.05)
         self.align_faces = ranker_cfg.get("align_faces", True)
         self.align_max_angle_deg = ranker_cfg.get("align_max_angle_deg", 30)
 
@@ -288,6 +291,24 @@ class FaceQualityEngine:
         face_cy = (face_box[1] + face_box[3]) / 2
         max_y = y1 + self.max_face_center_y_ratio * person_h
         return face_cy <= max_y
+
+    def is_back_turned_face(self, face, person_meta):
+        """Back of head / walking away — low frontality, eyes, or face not in head zone."""
+        if not self.is_face_in_head_region(face["face_box"], person_meta):
+            return True
+        metrics = face.get("metrics") or {}
+        if metrics.get("frontality", 0) < self.min_frontality_back:
+            return True
+        if metrics.get("eyes", 0) < self.min_eyes_back:
+            return True
+        x1, y1, x2, y2 = person_meta.get("x1"), person_meta.get("y1"), person_meta.get("x2"), person_meta.get("y2")
+        if x1 is not None and y2 is not None and y2 > y1:
+            person_area = max(1, (x2 - x1) * (y2 - y1))
+            fx1, fy1, fx2, fy2 = face["face_box"]
+            face_area = max(1, (fx2 - fx1) * (fy2 - fy1))
+            if face_area / person_area < self.min_face_to_person_area:
+                return True
+        return False
 
     def _extract_landmarks(self, detections, index):
         if not hasattr(detections, "keypoints") or detections.keypoints is None:
@@ -645,7 +666,7 @@ class FaceQualityEngine:
         face = self._find_face(full_frame, person_meta, person_crop)
         if face is None:
             return None, "no_face"
-        if not self.is_face_in_head_region(face["face_box"], person_meta):
+        if self.is_back_turned_face(face, person_meta):
             face["gate_reject"] = "back_facing"
             return face, "back_facing"
         if face.get("half_face"):
@@ -670,7 +691,7 @@ class FaceQualityEngine:
         )
         if face is None:
             return None, "no_face"
-        if not self.is_face_in_head_region(face["face_box"], person_meta):
+        if self.is_back_turned_face(face, person_meta):
             face["gate_reject"] = "back_facing"
             return face, "back_facing"
         if face.get("half_face"):

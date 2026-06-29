@@ -162,6 +162,8 @@ class PersonCaptureService:
         self.receding_peak_ratio = p.get("receding_peak_area_ratio", 0.82)
         self.receding_shrink_ratio = p.get("receding_shrink_ratio", 0.97)
         self.receding_shrink_frames = p.get("receding_shrink_frames", 2)
+        self.receding_require_shrink_streak = p.get("receding_require_shrink_streak", False)
+        self.receding_min_track_samples = p.get("receding_min_track_samples", 2)
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.person_model = YOLO(p["model"])
@@ -218,12 +220,23 @@ class PersonCaptureService:
                 os.remove(path)
 
     def _is_receding(self, track_id, box_area, peak_area):
-        """True when bbox is shrinking away from camera (walking backward)."""
-        if peak_area <= 0:
+        """True when person bbox is well below this track's peak (walking away)."""
+        if peak_area <= 0 or box_area >= peak_area * self.receding_peak_ratio:
+            with self._meta_lock:
+                meta = self.track_meta.get(track_id, {})
+                meta["last_area"] = box_area
+                self.track_meta[track_id] = meta
             return False
-        below_peak = box_area < peak_area * self.receding_peak_ratio
+
+        below_peak = True
         with self._meta_lock:
             meta = self.track_meta.get(track_id, {})
+            samples_seen = meta.get("samples_seen", 0)
+            if samples_seen < self.receding_min_track_samples:
+                meta["last_area"] = box_area
+                self.track_meta[track_id] = meta
+                return False
+
             last_area = meta.get("last_area")
             shrink_streak = meta.get("shrink_streak", 0)
             if last_area and box_area < last_area * self.receding_shrink_ratio:
@@ -233,8 +246,10 @@ class PersonCaptureService:
             meta["last_area"] = box_area
             meta["shrink_streak"] = shrink_streak
             self.track_meta[track_id] = meta
-        shrinking = shrink_streak >= self.receding_shrink_frames
-        return below_peak and shrinking
+
+        if self.receding_require_shrink_streak:
+            return below_peak and shrink_streak >= self.receding_shrink_frames
+        return below_peak
 
     def _save_sample(self, person_dir, frame_num, bbox, box_area, frame, *, receding=False):
         meta = {
@@ -383,8 +398,12 @@ class PersonCaptureService:
                         "peak_area_time": now,
                         "last_area": None,
                         "shrink_streak": 0,
+                        "samples_seen": 0,
                     }
                 peak_area = self.track_meta[tid].get("peak_buffer_area", 0)
+                self.track_meta[tid]["samples_seen"] = (
+                    self.track_meta[tid].get("samples_seen", 0) + 1
+                )
 
             receding = self._is_receding(tid, box_area, max(peak_area, box_area))
 
