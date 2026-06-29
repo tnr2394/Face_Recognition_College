@@ -23,7 +23,7 @@ class FaceQualityEngine:
         self.edge_margin = 20
         ranker_cfg = config.get("face_ranker", {})
         self.bbox_expand_ratio = ranker_cfg.get("bbox_expand_ratio", 0.05)
-        self.reject_half_face = ranker_cfg.get("reject_half_face", True)
+        self.reject_half_face = ranker_cfg.get("reject_half_face", False)
         self.max_face_area_ratio = ranker_cfg.get("max_face_area_ratio", 0.22)
         self.min_face_person_overlap = ranker_cfg.get("min_face_person_overlap", 0.12)
         self.multi_face_blur_ratio = ranker_cfg.get("multi_face_blur_ratio", 0.35)
@@ -679,7 +679,7 @@ class FaceQualityEngine:
         if back_reason:
             face["gate_reject"] = back_reason
             return face, "back_facing"
-        if face.get("half_face"):
+        if self.reject_half_face and face.get("half_face"):
             face["gate_reject"] = face.get("gate_reject") or "half_face"
         else:
             face["gate_reject"] = self.passes_gates(face["metrics"])
@@ -690,6 +690,7 @@ class FaceQualityEngine:
         if self.is_receding_sample(person_meta):
             return None, "receding"
         lenient = self.config.get("face", {}).get("lenient", {})
+        lenient_reject_half = lenient.get("reject_half_face", self.reject_half_face)
         face = self._find_face(
             full_frame,
             person_meta,
@@ -697,7 +698,7 @@ class FaceQualityEngine:
             conf=lenient.get("conf", 0.25),
             min_face_height=lenient.get("min_face_height_px", 20),
             bbox_expand_ratio=lenient.get("bbox_expand_ratio", 0.25),
-            reject_half_face=lenient.get("reject_half_face", False),
+            reject_half_face=lenient_reject_half,
         )
         if face is None:
             return None, "no_face"
@@ -705,7 +706,7 @@ class FaceQualityEngine:
         if back_reason:
             face["gate_reject"] = back_reason
             return face, "back_facing"
-        if face.get("half_face"):
+        if lenient_reject_half and face.get("half_face"):
             face["gate_reject"] = face.get("gate_reject") or "half_face"
         else:
             face["gate_reject"] = self.passes_gates(face["metrics"])

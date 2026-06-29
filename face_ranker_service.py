@@ -78,6 +78,7 @@ class FaceRankerService:
         ensure_dir(self.low_ofiq_dir)
         ensure_dir(self.outside_roi_dir)
         ensure_dir(self.rejected_dir)
+        print(f"Half-face filter: {'on' if self.face_engine.reject_half_face else 'off'}")
         if self.roi:
             print(
                 f"ROI export filter: ({self.roi['x1']:.3f},{self.roi['y1']:.3f})-"

@@ -30,7 +30,7 @@ face:
     conf: 0.25
     min_face_height_px: 20
     bbox_expand_ratio: 0.25
-    reject_half_face: false
+    # reject_half_face: optional override; defaults to face_ranker.reject_half_face
   score_weights:
     blur: 0.15
     lighting: 0.1
@@ -66,7 +66,7 @@ face_ranker:
   skip_fallback_edge_bbox: true
   max_bbox_y1_ratio: 0.72
   bbox_expand_ratio: 0.05
-  reject_half_face: true
+  reject_half_face: false
   max_face_area_ratio: 0.22
   min_face_person_overlap: 0.12
   multi_face_blur_ratio: 0.35
