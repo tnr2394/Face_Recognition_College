@@ -235,7 +235,9 @@ class FaceRankerService:
                 continue
             if reject == "back_facing":
                 stats["back_facing"] += 1
-                self._note_rejected_face(rejected, sample, face, "back_facing")
+                self._note_rejected_face(
+                    rejected, sample, face, face.get("gate_reject", "back_facing")
+                )
                 continue
             if reject == "no_face":
                 face, reject = self.face_engine.find_face_lenient(
@@ -246,7 +248,9 @@ class FaceRankerService:
                     continue
                 if reject == "back_facing":
                     stats["back_facing"] += 1
-                    self._note_rejected_face(rejected, sample, face, "back_facing")
+                    self._note_rejected_face(
+                        rejected, sample, face, face.get("gate_reject", "back_facing")
+                    )
                     continue
                 if reject == "no_face":
                     stats["no_face"] += 1

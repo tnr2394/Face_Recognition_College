@@ -72,11 +72,11 @@ face_ranker:
   multi_face_blur_ratio: 0.35
   head_anchor_ratio: 0.12
   skip_receding_samples: true
-  # Back / walking-away: face position + quality (not just bbox position).
-  max_face_center_y_ratio: 0.38
-  min_frontality_back: 55
-  min_eyes_back: 42
-  min_face_to_person_area: 0.05
+  # Back/profile filter — combined signals only (avoids false rejects at distance).
+  check_back_facing: true
+  max_face_center_y_ratio: 0.52
+  min_frontality_back: 40
+  min_eyes_back: 32
   export_only_passing_gates: true
   rejected_dir: rejected_faces
   # Eye-based roll correction before OFIQ + export (not profile frontalization).

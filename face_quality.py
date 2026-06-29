@@ -29,10 +29,10 @@ class FaceQualityEngine:
         self.multi_face_blur_ratio = ranker_cfg.get("multi_face_blur_ratio", 0.35)
         self.head_anchor_ratio = ranker_cfg.get("head_anchor_ratio", 0.12)
         self.skip_receding = ranker_cfg.get("skip_receding_samples", True)
-        self.max_face_center_y_ratio = ranker_cfg.get("max_face_center_y_ratio", 0.38)
-        self.min_frontality_back = ranker_cfg.get("min_frontality_back", 55)
-        self.min_eyes_back = ranker_cfg.get("min_eyes_back", 42)
-        self.min_face_to_person_area = ranker_cfg.get("min_face_to_person_area", 0.05)
+        self.check_back_facing = ranker_cfg.get("check_back_facing", True)
+        self.max_face_center_y_ratio = ranker_cfg.get("max_face_center_y_ratio", 0.52)
+        self.min_frontality_back = ranker_cfg.get("min_frontality_back", 40)
+        self.min_eyes_back = ranker_cfg.get("min_eyes_back", 32)
         self.align_faces = ranker_cfg.get("align_faces", True)
         self.align_max_angle_deg = ranker_cfg.get("align_max_angle_deg", 30)
 
@@ -282,7 +282,7 @@ class FaceQualityEngine:
         return bool(person_meta.get("receding"))
 
     def is_face_in_head_region(self, face_box, person_meta):
-        """Reject faces sitting too low in the person box (typical when walking away)."""
+        """True when the face center sits in the upper portion of the person box."""
         y1 = person_meta.get("y1")
         y2 = person_meta.get("y2")
         if y1 is None or y2 is None or y2 <= y1:
@@ -292,23 +292,32 @@ class FaceQualityEngine:
         max_y = y1 + self.max_face_center_y_ratio * person_h
         return face_cy <= max_y
 
-    def is_back_turned_face(self, face, person_meta):
-        """Back of head / walking away — low frontality, eyes, or face not in head zone."""
-        if not self.is_face_in_head_region(face["face_box"], person_meta):
-            return True
+    def back_facing_reason(self, face, person_meta):
+        """
+        Back/profile rejection — requires combined signals so distant front-facing
+        people (small face in a large person box) are not dropped.
+        """
+        if not self.check_back_facing:
+            return None
+
         metrics = face.get("metrics") or {}
-        if metrics.get("frontality", 0) < self.min_frontality_back:
-            return True
-        if metrics.get("eyes", 0) < self.min_eyes_back:
-            return True
-        x1, y1, x2, y2 = person_meta.get("x1"), person_meta.get("y1"), person_meta.get("x2"), person_meta.get("y2")
-        if x1 is not None and y2 is not None and y2 > y1:
-            person_area = max(1, (x2 - x1) * (y2 - y1))
-            fx1, fy1, fx2, fy2 = face["face_box"]
-            face_area = max(1, (fx2 - fx1) * (fy2 - fy1))
-            if face_area / person_area < self.min_face_to_person_area:
-                return True
-        return False
+        frontality = metrics.get("frontality", 0)
+        eyes = metrics.get("eyes", 0)
+        very_low_front = frontality < self.min_frontality_back * 0.7
+        low_front = frontality < self.min_frontality_back
+        low_eyes = eyes < self.min_eyes_back
+        head_ok = self.is_face_in_head_region(face["face_box"], person_meta)
+
+        if very_low_front:
+            return "back_facing_low_frontality"
+        if low_front and low_eyes:
+            return "back_facing"
+        if low_front and not head_ok:
+            return "back_facing_head_position"
+        return None
+
+    def is_back_turned_face(self, face, person_meta):
+        return self.back_facing_reason(face, person_meta) is not None
 
     def _extract_landmarks(self, detections, index):
         if not hasattr(detections, "keypoints") or detections.keypoints is None:
@@ -666,8 +675,9 @@ class FaceQualityEngine:
         face = self._find_face(full_frame, person_meta, person_crop)
         if face is None:
             return None, "no_face"
-        if self.is_back_turned_face(face, person_meta):
-            face["gate_reject"] = "back_facing"
+        back_reason = self.back_facing_reason(face, person_meta)
+        if back_reason:
+            face["gate_reject"] = back_reason
             return face, "back_facing"
         if face.get("half_face"):
             face["gate_reject"] = face.get("gate_reject") or "half_face"
@@ -691,8 +701,9 @@ class FaceQualityEngine:
         )
         if face is None:
             return None, "no_face"
-        if self.is_back_turned_face(face, person_meta):
-            face["gate_reject"] = "back_facing"
+        back_reason = self.back_facing_reason(face, person_meta)
+        if back_reason:
+            face["gate_reject"] = back_reason
             return face, "back_facing"
         if face.get("half_face"):
             face["gate_reject"] = face.get("gate_reject") or "half_face"
