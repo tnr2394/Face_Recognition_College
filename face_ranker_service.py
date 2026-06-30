@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import time
+from collections import Counter
 
 import cv2
 
@@ -480,7 +481,6 @@ class FaceRankerService:
             min(self.export_top_n, len(roi_entries)),
         )
         top_entries = roi_entries[:export_count]
-        self._clear_frame_exports(out_dir)
         to_export = []
         for entry in top_entries:
             item = {
@@ -499,26 +499,31 @@ class FaceRankerService:
                 if os.path.isfile(cache_path):
                     item["face_crop"] = cv2.imread(cache_path)
             to_export.append(item)
-        self._write_exports(out_dir, to_export)
+        if to_export:
+            self._clear_frame_exports(out_dir)
+            self._write_exports(out_dir, to_export)
         outside_roi_n = self._export_outside_roi(
             outside_entries, folder_name, cache_root=out_dir, from_entries=True
         )
         return len(to_export), len(sorted_entries), outside_roi_n
 
     def _cleanup_empty_recognition_folder(self, out_dir):
-        """No face exports in API mode — drop manifest-only folders."""
-        if not self.recognition_minimal or self._folder_has_face_export(out_dir):
+        """Remove recognition handoff folder when it has no face exports."""
+        if not os.path.isdir(out_dir):
             return
-        manifest_path = os.path.join(out_dir, RANK_MANIFEST)
-        if os.path.isfile(manifest_path):
-            os.remove(manifest_path)
-        cache_dir = os.path.join(out_dir, FACE_CACHE_DIR)
-        if os.path.isdir(cache_dir):
-            shutil.rmtree(cache_dir, ignore_errors=True)
-        ready_file = os.path.join(out_dir, ".ready")
-        if os.path.isfile(ready_file):
-            os.remove(ready_file)
-        print(f"No face exports for {out_dir} — removed manifest-only artifacts")
+        if self._folder_has_face_export(out_dir):
+            return
+        for name in list(os.listdir(out_dir)):
+            path = os.path.join(out_dir, name)
+            if os.path.isfile(path):
+                os.remove(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+        try:
+            os.rmdir(out_dir)
+            print(f"Removed empty recognition folder {out_dir}")
+        except OSError:
+            print(f"No face exports for {out_dir} — removed artifacts (folder not empty)")
 
     def _low_ofiq_dir_for_batch(self, folder_name):
         if self.merge_batches:
@@ -616,10 +621,65 @@ class FaceRankerService:
             f"gated={stats.get('gated', 0)}"
         )
 
-    def _export_rejected_batch(self, batch_dir, folder_name, samples, stats, rejected):
-        """Keep a debug copy when every frame fails before export."""
+    def _primary_rejection_reason(
+        self, stats, rejected, candidates, *, low_ofiq_n=0, outside_roi_n=0
+    ):
+        """Pick the dominant reason this batch did not reach recognition."""
+        reason_counts = Counter()
+        for item in rejected:
+            reason_counts[item.get("reason", "unknown")] += 1
+        for candidate in candidates or []:
+            gate = candidate.get("gate")
+            if gate and gate != "ok":
+                reason_counts[gate] += 1
+        if outside_roi_n > 0:
+            reason_counts["outside_roi"] += outside_roi_n
+        if low_ofiq_n > 0:
+            reason_counts["below_ofiq"] += low_ofiq_n
+
+        if reason_counts:
+            return reason_counts.most_common(1)[0][0]
+
+        if stats.get("no_face"):
+            return "no_face"
+        if stats.get("back_facing"):
+            return "back_facing"
+        if stats.get("receding"):
+            return "receding"
+        if stats.get("gated"):
+            return "gated"
+        return "unknown"
+
+    def _clear_rejected_dir_for_batch(self, folder_name):
+        out_dir = self._rejected_dir_for_batch(folder_name)
+        if os.path.isdir(out_dir):
+            shutil.rmtree(out_dir, ignore_errors=True)
+
+    def _export_rejected_batch(
+        self,
+        batch_dir,
+        folder_name,
+        samples,
+        stats,
+        rejected,
+        *,
+        candidates=None,
+        primary_reason=None,
+        low_ofiq_n=0,
+        outside_roi_n=0,
+        alternate_dirs=None,
+    ):
+        """Debug folder when a batch does not produce recognition exports."""
         if not samples:
             return
+
+        primary_reason = primary_reason or self._primary_rejection_reason(
+            stats,
+            rejected,
+            candidates,
+            low_ofiq_n=low_ofiq_n,
+            outside_roi_n=outside_roi_n,
+        )
         out_dir = self._rejected_dir_for_batch(folder_name)
         os.makedirs(out_dir, exist_ok=True)
 
@@ -641,12 +701,34 @@ class FaceRankerService:
                 os.path.join(out_dir, f"frame_{reject_frame}_face_{reason}.jpg"),
                 best_reject["face_crop"],
             )
+        elif candidates:
+            best_candidate = max(candidates, key=lambda c: c["rank"])
+            if best_candidate.get("face_crop") is not None:
+                gate = best_candidate.get("gate", "unknown")
+                cv2.imwrite(
+                    os.path.join(
+                        out_dir,
+                        f"frame_{best_candidate['frame_num']}_face_{gate}.jpg",
+                    ),
+                    best_candidate["face_crop"],
+                )
 
         summary = {
             "batch": folder_name,
+            "primary_reason": primary_reason,
             "queue_dir": os.path.abspath(batch_dir),
             "stats": stats,
             "best_sample_frame": frame_num,
+            "alternate_dirs": alternate_dirs or {},
+            "candidate_gates": [
+                {
+                    "frame": c["frame_num"],
+                    "gate": c.get("gate"),
+                    "ofiq": c.get("ofiq"),
+                    "source": c.get("source"),
+                }
+                for c in (candidates or [])
+            ],
             "rejected_face_attempts": [
                 {
                     "frame": item["frame_num"],
@@ -659,9 +741,20 @@ class FaceRankerService:
         with open(os.path.join(out_dir, "_reject_summary.json"), "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)
 
+        reason_line = (
+            f"PRIMARY REASON: {primary_reason}\n"
+            f"{self._format_reject_stats(stats, len(samples))}\n"
+        )
+        if alternate_dirs:
+            for label, path in alternate_dirs.items():
+                if path:
+                    reason_line += f"{label}: {path}\n"
+        with open(os.path.join(out_dir, "REJECT_REASON.txt"), "w", encoding="utf-8") as f:
+            f.write(reason_line)
+
         print(
-            f"  rejected -> {out_dir} "
-            f"({self._format_reject_stats(stats, len(samples))})"
+            f"  not recognized -> {out_dir} "
+            f"(primary={primary_reason}, {self._format_reject_stats(stats, len(samples))})"
         )
 
     def _output_dir_for_batch(self, folder_name):
@@ -670,6 +763,14 @@ class FaceRankerService:
             if track_id is not None:
                 return os.path.join(self.output_dir, f"person_{track_id}")
         return os.path.join(self.output_dir, folder_name)
+
+    def _alternate_export_dirs(self, folder_name, low_ofiq_n, outside_roi_n):
+        alternates = {}
+        if low_ofiq_n > 0:
+            alternates["low_ofiq"] = self._low_ofiq_dir_for_batch(folder_name)
+        if outside_roi_n > 0:
+            alternates["outside_roi"] = self._outside_roi_dir_for_batch(folder_name)
+        return alternates
 
     def process_batch(self, batch_dir, folder_name):
         samples = []
@@ -683,28 +784,39 @@ class FaceRankerService:
             return False
 
         candidates, stats, rejected = self._collect_candidates(samples)
+        out_dir = self._output_dir_for_batch(folder_name)
+        low_ofiq_n = 0
+        outside_roi_n = 0
+        exported_count = 0
+
         if not candidates:
-            self._export_rejected_batch(batch_dir, folder_name, samples, stats, rejected)
+            self._export_rejected_batch(
+                batch_dir,
+                folder_name,
+                samples,
+                stats,
+                rejected,
+                primary_reason=self._primary_rejection_reason(stats, rejected, []),
+            )
+            self._cleanup_empty_recognition_folder(out_dir)
             print(
                 f"No export for {folder_name}: {self._format_reject_stats(stats, len(samples))}. "
-                f"Raw captures remain in {batch_dir}; debug copy in "
-                f"{self._rejected_dir_for_batch(folder_name)}/"
+                f"See {self._rejected_dir_for_batch(folder_name)}/REJECT_REASON.txt"
             )
             return False
 
         candidates.sort(key=lambda c: c["rank"], reverse=True)
         export_pool = self._exportable_candidates(candidates)
         roi_candidates, outside_candidates = self._filter_candidates_by_roi(export_pool)
-        out_dir = self._output_dir_for_batch(folder_name)
-        os.makedirs(out_dir, exist_ok=True)
 
         if self.merge_batches:
-            exported, pool_size, outside_roi_n = self._accumulate_and_export_merged(
+            os.makedirs(out_dir, exist_ok=True)
+            exported_count, pool_size, outside_roi_n = self._accumulate_and_export_merged(
                 out_dir, candidates, folder_name
             )
             low_ofiq_n = self._export_below_ofiq(candidates, folder_name)
             print(
-                f"Exported {exported}/{pool_size} global best from {folder_name} -> {out_dir} "
+                f"Batch {folder_name}: exported={exported_count}/{pool_size} -> {out_dir} "
                 f"(normal={stats['normal']}, lenient={stats['lenient']}, "
                 f"fallback={stats['fallback']}, receding={stats['receding']}, "
                 f"back_facing={stats['back_facing']}, gated={stats.get('gated', 0)}, "
@@ -712,14 +824,17 @@ class FaceRankerService:
                 f"no_face_frames={stats['no_face']})"
             )
         else:
+            if roi_candidates:
+                os.makedirs(out_dir, exist_ok=True)
             export_count = max(self.min_export, min(self.export_top_n, len(roi_candidates)))
             to_export = roi_candidates[:export_count]
-            self._write_exports(out_dir, to_export)
+            if to_export:
+                self._write_exports(out_dir, to_export)
+                exported_count = len(to_export)
             outside_roi_n = self._export_outside_roi(outside_candidates, folder_name)
             low_ofiq_n = self._export_below_ofiq(candidates, folder_name)
-            self._cleanup_empty_recognition_folder(out_dir)
             print(
-                f"Exported {len(to_export)}/{len(candidates)} from {folder_name} -> {out_dir} "
+                f"Batch {folder_name}: exported={exported_count}/{len(candidates)} -> {out_dir} "
                 f"(normal={stats['normal']}, lenient={stats['lenient']}, "
                 f"fallback={stats['fallback']}, receding={stats['receding']}, "
                 f"back_facing={stats['back_facing']}, gated={stats.get('gated', 0)}, "
@@ -727,16 +842,40 @@ class FaceRankerService:
                 f"no_face_frames={stats['no_face']})"
             )
 
-        if self.merge_batches:
-            self._cleanup_empty_recognition_folder(out_dir)
+        has_recognition_export = self._folder_has_face_export(out_dir)
+        alternates = self._alternate_export_dirs(folder_name, low_ofiq_n, outside_roi_n)
 
-        if self.write_ready and not self.rank_only:
-            if self.recognition_minimal and not self._folder_has_face_export(out_dir):
-                print(f"No .ready for {out_dir} — no face image to send to API")
-            else:
+        if has_recognition_export:
+            self._clear_rejected_dir_for_batch(folder_name)
+            if self.write_ready and not self.rank_only:
                 write_ready(out_dir)
+            return True
 
-        return True
+        self._cleanup_empty_recognition_folder(out_dir)
+        primary_reason = self._primary_rejection_reason(
+            stats,
+            rejected,
+            candidates,
+            low_ofiq_n=low_ofiq_n,
+            outside_roi_n=outside_roi_n,
+        )
+        self._export_rejected_batch(
+            batch_dir,
+            folder_name,
+            samples,
+            stats,
+            rejected,
+            candidates=candidates,
+            primary_reason=primary_reason,
+            low_ofiq_n=low_ofiq_n,
+            outside_roi_n=outside_roi_n,
+            alternate_dirs=alternates,
+        )
+        print(
+            f"No recognition export for {folder_name} (primary={primary_reason}). "
+            f"See {self._rejected_dir_for_batch(folder_name)}/REJECT_REASON.txt"
+        )
+        return False
 
     def run_once(self):
         processed_any = False

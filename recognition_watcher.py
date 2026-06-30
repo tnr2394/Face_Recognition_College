@@ -567,7 +567,11 @@ def process_person_folder(person_dir, person_folder, tracking_id):
     """Run batch recognition, save result JSON, log to DB, and notify Discord."""
     face_files = get_top_cropped_faces(person_dir, RECOGNITION_BATCH_SIZE)
     if not face_files:
-        print(f"Person {tracking_id} has no face crops, skipping")
+        print(f"Person {tracking_id} has no face crops — skipping empty recognition folder")
+        ready_file = os.path.join(person_dir, ".ready")
+        if os.path.isfile(ready_file):
+            os.remove(ready_file)
+        mark_processed(person_dir)
         return
 
     threshold = get_ofiq_threshold()
