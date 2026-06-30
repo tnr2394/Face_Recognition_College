@@ -97,6 +97,8 @@ def main():
     child_env = os.environ.copy()
     if args.with_recognition:
         child_env["PIPELINE_RECOGNITION_MODE"] = "1"
+        if args.video_source:
+            child_env["PIPELINE_VIDEO_SOURCE"] = str(args.video_source)
         recognition_dir = config.get("ofiq", {}).get("recognition_dir", "recognition_folder")
         low_ofiq_dir = config.get("ofiq", {}).get("low_ofiq_dir", "low_ofiq_faces")
         outside_roi_dir = config.get("roi", {}).get("outside_roi_dir", "outside_roi_faces")

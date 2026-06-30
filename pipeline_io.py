@@ -116,6 +116,13 @@ def is_processed(folder):
     return os.path.isfile(os.path.join(folder, PROCESSED_MARKER))
 
 
+def clear_processed(folder):
+    """Remove processed marker so a folder can be handed off again."""
+    marker = os.path.join(folder, PROCESSED_MARKER)
+    if os.path.isfile(marker):
+        os.remove(marker)
+
+
 def folder_inactive(folder, wait_sec=5):
     now = time.time()
     for name in os.listdir(folder):

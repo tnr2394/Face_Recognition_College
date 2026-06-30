@@ -32,6 +32,26 @@ INACTIVITY_WAIT = 5  # seconds to wait for folder inactivity
 CHECK_INTERVAL = 3   # seconds between folder checks
 RECOGNITION_BATCH_SIZE = 15  # Process up to this many faces per person (same as face_recognition.py)
 
+def get_face_server_url():
+    """Face server base URL (env > config > default)."""
+    env_url = os.environ.get("FACE_SERVER_URL", "").strip()
+    if env_url:
+        return env_url.rstrip("/")
+    cfg_url = load_config().get("watcher", {}).get("face_server_url", "").strip()
+    if cfg_url:
+        return cfg_url.rstrip("/")
+    return FACE_SERVER_URL.rstrip("/")
+
+def get_video_source_name():
+    """Camera label for dashboard logs (legacy VideoName field)."""
+    env_name = os.environ.get("PIPELINE_VIDEO_SOURCE", "").strip()
+    if env_name:
+        return env_name
+    cfg_name = load_config().get("watcher", {}).get("video_source", "").strip()
+    if cfg_name:
+        return cfg_name
+    return ""
+
 def is_training_mode_enabled():
     """Read training mode from the face server (cached briefly)."""
     now = time.time()
@@ -42,13 +62,13 @@ def is_training_mode_enabled():
         return _training_mode_cache['value']
 
     try:
-        response = requests.get(f"{FACE_SERVER_URL}/settings/training", timeout=5)
+        response = requests.get(f"{get_face_server_url()}/settings/training", timeout=5)
         if response.status_code == 200:
             payload = response.json()
             if isinstance(payload, dict):
                 enabled = bool(payload.get('enabled', False))
             else:
-                config_response = requests.get(f"{FACE_SERVER_URL}/config", timeout=5)
+                config_response = requests.get(f"{get_face_server_url()}/config", timeout=5)
                 config_payload = config_response.json() if config_response.status_code == 200 else {}
                 enabled = bool((config_payload or {}).get('training', {}).get('enabled', False))
             _training_mode_cache['value'] = enabled
@@ -85,7 +105,7 @@ def recognize_face(image_path, track_id):
         training_mode = is_training_mode_enabled()
         endpoint = "extract" if training_mode else "search"
         print(f"Recognizing face ({endpoint}): {image_path}")
-        url = f"{FACE_SERVER_URL}/{endpoint}"
+        url = f"{get_face_server_url()}/{endpoint}"
 
         base64_image = encode_face_image_b64(image_path)
 
@@ -337,7 +357,7 @@ def get_full_frame_for_crop(person_dir, crop_path):
     return crop_path
 
 def get_metadata_from_txt(image_path, folder_path):
-    """Extract metadata from corresponding txt file (same as face_recognition.py)."""
+    """Extract metadata from legacy sidecar txt files (face_recognition.py format)."""
     try:
         if not image_path:
             txt_files = [f for f in os.listdir(folder_path) if f.endswith('.txt')]
@@ -375,6 +395,69 @@ def get_metadata_from_txt(image_path, folder_path):
         print(f"Error reading metadata: {e}")
         return {}
 
+def _metadata_from_meta_json(image_path, folder_path):
+    """Read bbox metadata from pipeline frame_*_meta.json when txt sidecars are absent."""
+    frame_num = None
+    if image_path:
+        match = re.match(r'.*frame_(\d+)_(?:face|person|full)_score_.*', os.path.basename(image_path))
+        if match:
+            frame_num = match.group(1)
+    if not frame_num:
+        meta_files = [f for f in os.listdir(folder_path) if f.endswith("_meta.json")]
+        if not meta_files:
+            return {}
+        frame_num = frame_num_from_meta_filename(meta_files[0])
+    if not frame_num:
+        return {}
+
+    meta_path = os.path.join(folder_path, f"frame_{frame_num}_meta.json")
+    if not os.path.isfile(meta_path):
+        manifest_path = os.path.join(folder_path, "_rank_manifest.json")
+        if os.path.isfile(manifest_path):
+            try:
+                with open(manifest_path, encoding="utf-8") as f:
+                    for entry in json.load(f).get("entries", []):
+                        if str(entry.get("frame_num")) == str(frame_num):
+                            meta = entry.get("meta") or {}
+                            if meta:
+                                return {
+                                    "Box": f"({meta.get('x1')}, {meta.get('y1')}, {meta.get('x2')}, {meta.get('y2')})",
+                                    "box_width": meta.get("x2", 0) - meta.get("x1", 0),
+                                    "box_height": meta.get("y2", 0) - meta.get("y1", 0),
+                                }
+            except (json.JSONDecodeError, OSError, TypeError):
+                pass
+        return {}
+
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        x1, y1, x2, y2 = meta.get("x1"), meta.get("y1"), meta.get("x2"), meta.get("y2")
+        if None in (x1, y1, x2, y2):
+            return {}
+        return {
+            "Box": f"({x1}, {y1}, {x2}, {y2})",
+            "box_width": x2 - x1,
+            "box_height": y2 - y1,
+        }
+    except (json.JSONDecodeError, OSError, TypeError):
+        return {}
+
+def frame_num_from_meta_filename(meta_filename):
+    match = re.match(r"frame_(\d+)_meta\.json", meta_filename)
+    return match.group(1) if match else None
+
+def get_folder_metadata(image_path, folder_path):
+    """Merge legacy txt metadata, pipeline meta.json, and configured camera name."""
+    metadata = get_metadata_from_txt(image_path, folder_path)
+    if not metadata:
+        metadata = _metadata_from_meta_json(image_path, folder_path)
+
+    video_name = metadata.get("VideoName") or get_video_source_name()
+    if video_name:
+        metadata["VideoName"] = video_name
+    return metadata
+
 def determine_final_result(recognition_results, folder_path, track_id):
     """Determine final recognition result using majority voting (same as face_recognition.py)."""
     try:
@@ -392,7 +475,7 @@ def determine_final_result(recognition_results, folder_path, track_id):
             person_ids = [r['id'] for r in successful_recognitions]
             most_common_id = Counter(person_ids).most_common(1)[0][0]
             final_person_data = next(r for r in successful_recognitions if r['id'] == most_common_id)
-            metadata = get_metadata_from_txt(final_person_data['image_path'], folder_path)
+            metadata = get_folder_metadata(final_person_data['image_path'], folder_path)
 
             return {
                 "status": True,
@@ -405,7 +488,7 @@ def determine_final_result(recognition_results, folder_path, track_id):
             }
 
         first_result = recognition_results[0] if recognition_results else {}
-        metadata = get_metadata_from_txt(first_result.get('image_path', ''), folder_path)
+        metadata = get_folder_metadata(first_result.get('image_path', ''), folder_path)
         errors = [r['error'] for r in recognition_results if 'error' in r]
 
         print(f"Recognition failed for person {track_id}: {len(recognition_results)} attempts, 0 successful")
@@ -491,10 +574,12 @@ def log_recognition_event(folder_path, track_id, folder_name, final_result):
             frame_image_path = os.path.join(folder_path, frame_files[0]) if frame_files else None
 
         metadata = final_result.get('metadata') or {}
+        # Unique per event: merged person_{id} folders reuse the same directory name across batches.
+        log_track_folder = f"{folder_name}_{int(time.time())}"
         payload = {
             'status': bool(final_result.get('status')),
             'track_id': str(track_id),
-            'track_folder': folder_name,
+            'track_folder': log_track_folder,
             'video_source': metadata.get('VideoName'),
             'total_samples': final_result.get('total_samples'),
             'successful_samples': final_result.get('successful_samples'),
@@ -503,9 +588,11 @@ def log_recognition_event(folder_path, track_id, folder_name, final_result):
         }
 
         if face_image_path and os.path.isfile(face_image_path):
+            payload['face_image_path'] = face_image_path
             with open(face_image_path, 'rb') as img_f:
                 payload['face_image_b64'] = base64.b64encode(img_f.read()).decode('utf-8')
         if frame_image_path and os.path.isfile(frame_image_path):
+            payload['frame_image_path'] = frame_image_path
             with open(frame_image_path, 'rb') as img_f:
                 payload['frame_image_b64'] = base64.b64encode(img_f.read()).decode('utf-8')
 
@@ -515,16 +602,31 @@ def log_recognition_event(folder_path, track_id, folder_name, final_result):
             payload['person_name'] = rec_data.get('name')
             payload['distance'] = rec_data.get('distance_image')
 
+        server_url = get_face_server_url()
         response = requests.post(
-            f"{FACE_SERVER_URL}/recognitions",
+            f"{server_url}/recognitions",
             headers={'Content-Type': 'application/json'},
             json=payload,
             timeout=10,
         )
         if response.status_code in (200, 201):
-            print(f"Logged recognition event for person {track_id} (recognition_events)")
+            body = response.json() if response.content else {}
+            event_id = body.get('id')
+            if body.get('status') == 'exists':
+                print(
+                    f"Warning: recognition event {log_track_folder} already existed on server "
+                    f"(id={event_id}); images may have been backfilled only"
+                )
+            else:
+                print(
+                    f"Logged recognition event for person {track_id} "
+                    f"-> {log_track_folder} (recognition_events id={event_id})"
+                )
         else:
-            print(f"Warning: failed to log recognition event ({response.status_code}): {response.text[:200]}")
+            print(
+                f"Warning: failed to log recognition event for person {track_id} "
+                f"({response.status_code}): {response.text[:300]}"
+            )
     except Exception as e:
         print(f"Warning: could not log recognition event for person {track_id}: {e}")
 
@@ -686,7 +788,10 @@ def main():
     config = load_config()
     watcher_cfg = config.get("watcher", {})
     training_mode = is_training_mode_enabled()
-    print(f"Face server: {FACE_SERVER_URL}")
+    print(f"Face server: {get_face_server_url()}")
+    video_source = get_video_source_name()
+    if video_source:
+        print(f"Dashboard camera label (VideoName): {video_source}")
     print(f"Mode: {'training (/extract)' if training_mode else 'search (/search)'}")
     print(f"OFIQ threshold: {get_ofiq_threshold()} (pass if score >= threshold)")
     print(

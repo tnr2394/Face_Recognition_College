@@ -20,6 +20,7 @@ from pipeline_io import (
     iter_staging_samples,
     load_config,
     load_roi,
+    clear_processed,
     mark_processed,
     folder_inactive,
     parse_track_id_from_folder,
@@ -907,6 +908,7 @@ class FaceRankerService:
 
         if has_recognition_export:
             self._clear_rejected_dir_for_batch(folder_name)
+            clear_processed(out_dir)
             if self.write_ready and not self.rank_only:
                 write_ready(out_dir)
             return True
