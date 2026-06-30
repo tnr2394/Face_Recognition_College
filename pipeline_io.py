@@ -13,9 +13,29 @@ READY_MARKER = ".ready"
 PROCESSED_MARKER = ".processed"
 
 
+def _deep_merge(base, overlay):
+    """Merge overlay dict into base (overlay wins on conflicts)."""
+    for key, value in overlay.items():
+        if key == "profiles":
+            continue
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+
+
 def load_config(path=CONFIG_PATH):
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+    profile_name = config.get("camera_profile")
+    if profile_name:
+        profiles = config.get("profiles") or {}
+        overlay = profiles.get(profile_name)
+        if overlay:
+            _deep_merge(config, overlay)
+        else:
+            print(f"Warning: camera_profile '{profile_name}' has no profiles.{profile_name} section")
+    return config
 
 
 def clamp_bbox(x1, y1, x2, y2, frame_w, frame_h):

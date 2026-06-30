@@ -79,6 +79,8 @@ class FaceRankerService:
         ensure_dir(self.low_ofiq_dir)
         ensure_dir(self.outside_roi_dir)
         ensure_dir(self.rejected_dir)
+        profile = self.config.get("camera_profile", "standard")
+        print(f"Camera profile: {profile}")
         print(f"Half-face filter: {'on' if self.face_engine.reject_half_face else 'off'}")
         if self.roi:
             print(
@@ -716,6 +718,7 @@ class FaceRankerService:
         summary = {
             "batch": folder_name,
             "primary_reason": primary_reason,
+            "camera_profile": self.config.get("camera_profile", "standard"),
             "queue_dir": os.path.abspath(batch_dir),
             "stats": stats,
             "best_sample_frame": frame_num,
@@ -745,6 +748,27 @@ class FaceRankerService:
             f"PRIMARY REASON: {primary_reason}\n"
             f"{self._format_reject_stats(stats, len(samples))}\n"
         )
+        if rejected:
+            best = max(
+                rejected,
+                key=lambda item: (item.get("metrics") or {}).get("combined", 0),
+            )
+            m = best.get("metrics") or {}
+            reason_line += (
+                f"Best attempt frame {best['frame_num']} ({best['reason']}): "
+                f"blur_norm={m.get('blur_norm', m.get('blur', 0)):.1f}, "
+                f"frontality={m.get('frontality', 0):.1f}, "
+                f"eyes={m.get('eyes', 0):.1f}, "
+                f"mouth={m.get('mouth', 0):.1f}, "
+                f"combined={m.get('combined', 0):.1f}\n"
+            )
+        elif candidates:
+            best = max(candidates, key=lambda c: c["rank"])
+            m = best.get("combined", 0)
+            reason_line += (
+                f"Best candidate frame {best['frame_num']}: gate={best.get('gate')}, "
+                f"ofiq={best.get('ofiq', 0):.2f}, combined={m:.1f}\n"
+            )
         if alternate_dirs:
             for label, path in alternate_dirs.items():
                 if path:

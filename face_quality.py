@@ -35,6 +35,7 @@ class FaceQualityEngine:
         self.min_eyes_back = ranker_cfg.get("min_eyes_back", 32)
         self.align_faces = ranker_cfg.get("align_faces", True)
         self.align_max_angle_deg = ranker_cfg.get("align_max_angle_deg", 30)
+        self.camera_profile = config.get("camera_profile", "standard")
 
         model_path = face_cfg["model"]
         if not __import__("os").path.isfile(model_path):
@@ -60,6 +61,15 @@ class FaceQualityEngine:
         return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
     @staticmethod
+    def normalize_blur_score(raw_blur, img):
+        """Scale blur so small/distant overhead faces are not auto-rejected."""
+        if img is None or img.size == 0:
+            return raw_blur
+        h, w = img.shape[:2]
+        ref_area = 112.0 * 112.0
+        return raw_blur * ref_area / max(h * w, 1.0)
+
+    @staticmethod
     def calculate_lighting_score(img):
         if img.size == 0:
             return 0.0
@@ -77,8 +87,7 @@ class FaceQualityEngine:
             return (1 - size_pct) * 200
         return 100 * size_pct * 2
 
-    @staticmethod
-    def check_face_completeness(face_img):
+    def check_face_completeness(self, face_img):
         try:
             if face_img.size == 0:
                 return 0.0
@@ -101,7 +110,8 @@ class FaceQualityEngine:
             center_x = np.sum(x * gray) / np.sum(gray) if np.sum(gray) > 0 else 32
             center_score = 1 - abs(center_x - 32) / 32
             score = (symmetry * 0.35 + balance * 0.3 + center_score * 0.35) * 100
-            if balance < 0.3 or symmetry < 0.3:
+            sym_floor = 0.22 if self.camera_profile == "overhead" else 0.3
+            if balance < sym_floor or symmetry < sym_floor:
                 score *= 0.7
             return max(0.0, min(100.0, score))
         except Exception:
@@ -133,7 +143,9 @@ class FaceQualityEngine:
             center_alignment = max(0, 1.0 - abs(eye_midpoint_x - (w / 2)) / (w / 2))
             eye_distance = abs(right_eye[0] - left_eye[0])
             distance_ratio = eye_distance / w
-            distance_score = 1.0 - min(1.0, abs(distance_ratio - 0.43) / 0.2)
+            ratio_target = 0.38 if self.camera_profile == "overhead" else 0.43
+            ratio_tolerance = 0.35 if self.camera_profile == "overhead" else 0.2
+            distance_score = 1.0 - min(1.0, abs(distance_ratio - ratio_target) / ratio_tolerance)
             return min(
                 100,
                 max(
@@ -189,25 +201,54 @@ class FaceQualityEngine:
             return 50.0
 
     @staticmethod
-    def detect_closed_mouth(face_img):
+    def _mouth_roi(face_img, landmarks=None):
+        """Mouth region — landmark-based when available, else proportional band."""
+        h, w = face_img.shape[:2]
+        if landmarks is not None and len(landmarks) >= 4:
+            eye_cy = (landmarks[1] + landmarks[3]) / 2
+            eye_cx = (landmarks[0] + landmarks[2]) / 2
+            eye_dist = max(4.0, abs(landmarks[2] - landmarks[0]))
+            mouth_cy = eye_cy + 0.9 * eye_dist
+            half_h = 0.45 * eye_dist
+            half_w = 0.65 * eye_dist
+            y1 = int(max(0, mouth_cy - half_h))
+            y2 = int(min(h, mouth_cy + half_h))
+            x1 = int(max(0, eye_cx - half_w))
+            x2 = int(min(w, eye_cx + half_w))
+        else:
+            # Overhead / no landmarks: wider band than old fixed bottom slice.
+            y1 = int(h * 0.52)
+            y2 = int(h * 0.92)
+            x1 = int(w * 0.18)
+            x2 = int(w * 0.82)
+        if y2 <= y1 or x2 <= x1:
+            return None
+        return face_img[y1:y2, x1:x2]
+
+    def score_mouth_visibility(self, face_img, landmarks=None):
+        """
+        Mouth quality for recognition — texture/edge based, not closed-vs-open.
+        Works with overhead cameras where chin shadow fooled the old dark-pixel test.
+        """
         if face_img.size == 0:
             return 0.0
         try:
-            h, w, _ = face_img.shape
-            mouth_roi = face_img[
-                int(h * 0.65) : int(h * 0.95),
-                int(w * 0.25) : int(w * 0.75),
-            ]
-            if mouth_roi.size == 0:
+            mouth_roi = self._mouth_roi(face_img, landmarks)
+            if mouth_roi is None or mouth_roi.size == 0:
                 return 50.0
-            gray_mouth = cv2.cvtColor(mouth_roi, cv2.COLOR_BGR2GRAY)
-            binary = cv2.adaptiveThreshold(
-                gray_mouth, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 11, 2
-            )
-            dark_pixel_percentage = np.sum(binary == 255) / binary.size
-            return 100 * (1 - min(1, dark_pixel_percentage / 0.15))
+            gray = cv2.cvtColor(mouth_roi, cv2.COLOR_BGR2GRAY)
+            lap = cv2.Laplacian(gray, cv2.CV_64F).var()
+            edges = cv2.Canny(gray, 40, 120)
+            edge_density = np.count_nonzero(edges) / edges.size
+            texture = min(100.0, max(0.0, lap * 0.35))
+            edge_score = min(100.0, max(0.0, edge_density * 600))
+            return min(100.0, max(0.0, texture * 0.55 + edge_score * 0.45))
         except Exception:
             return 50.0
+
+    def detect_closed_mouth(self, face_img, landmarks=None):
+        """Backward-compatible alias for score_mouth_visibility."""
+        return self.score_mouth_visibility(face_img, landmarks)
 
     def is_half_face(self, face_img, box, frame_w, frame_h):
         try:
@@ -225,13 +266,15 @@ class FaceQualityEngine:
             ):
                 return True
             aspect_ratio = face_w / face_h if face_h > 0 else 0
-            if aspect_ratio < 0.5 or aspect_ratio > 1.2:
+            max_aspect = 1.35 if self.camera_profile == "overhead" else 1.2
+            min_symmetry = 0.42 if self.camera_profile == "overhead" else 0.5
+            if aspect_ratio < 0.5 or aspect_ratio > max_aspect:
                 return True
             gray = cv2.cvtColor(cv2.resize(face_img, (64, 64)), cv2.COLOR_BGR2GRAY)
             left_half = gray[:, :32]
             right_half = np.fliplr(gray[:, 32:])
             symmetry = np.corrcoef(left_half.flatten(), right_half.flatten())[0, 1]
-            if np.isnan(symmetry) or symmetry < 0.5:
+            if np.isnan(symmetry) or symmetry < min_symmetry:
                 return True
             edges = cv2.Canny(gray, 100, 200)
             border_size = 5
@@ -246,7 +289,9 @@ class FaceQualityEngine:
                 return True
             face_center_x = x1 + face_w / 2
             relative_x = face_center_x / frame_w
-            if relative_x < 0.25 or relative_x > 0.75:
+            edge_lo = 0.12 if self.camera_profile == "overhead" else 0.25
+            edge_hi = 0.88 if self.camera_profile == "overhead" else 0.75
+            if relative_x < edge_lo or relative_x > edge_hi:
                 return True
             return False
         except Exception:
@@ -262,18 +307,22 @@ class FaceQualityEngine:
         return total / weight_sum if weight_sum > 0 else 0.0
 
     def passes_gates(self, metrics):
-        if metrics.get("blur", 0) < self.gates["blur"]:
-            return "low_blur"
-        if metrics.get("completeness", 0) < self.gates["completeness"]:
-            return "low_completeness"
-        if metrics.get("frontality", 0) < self.gates["frontality"]:
-            return "low_frontality"
-        if metrics.get("eyes", 0) < self.gates["eyes"]:
-            return "low_eyes"
-        if metrics.get("mouth", 0) < self.gates["mouth"]:
-            return "low_mouth"
-        if metrics.get("combined", 0) < self.gates["combined"]:
-            return "low_combined"
+        blur_gate = self.gates.get("blur", 0)
+        if blur_gate > 0:
+            blur_val = metrics.get("blur_norm", metrics.get("blur", 0))
+            if blur_val < blur_gate:
+                return "low_blur"
+        gate_checks = (
+            ("completeness", "low_completeness"),
+            ("frontality", "low_frontality"),
+            ("eyes", "low_eyes"),
+            ("mouth", "low_mouth"),
+            ("combined", "low_combined"),
+        )
+        for metric_key, reject_reason in gate_checks:
+            threshold = self.gates.get(metric_key, 0)
+            if threshold > 0 and metrics.get(metric_key, 0) < threshold:
+                return reject_reason
         return None
 
     def is_receding_sample(self, person_meta):
@@ -312,7 +361,7 @@ class FaceQualityEngine:
             return "back_facing_low_frontality"
         if low_front and low_eyes:
             return "back_facing"
-        if low_front and not head_ok:
+        if low_front and not head_ok and self.camera_profile != "overhead":
             return "back_facing_head_position"
         return None
 
@@ -556,21 +605,24 @@ class FaceQualityEngine:
             ):
                 continue
 
-            face_img = image[y1:y2, x1:x2].copy()
+            face_img_raw = image[y1:y2, x1:x2].copy()
             landmarks = self._extract_landmarks(detections, i)
-            face_img = self._prepare_face_crop(face_img, landmarks, x1, y1)
+            local_landmarks = self._landmarks_in_crop(landmarks, x1, y1)
+            face_img = self._prepare_face_crop(face_img_raw, landmarks, x1, y1)
             half_face = reject_half and self.is_half_face(
-                face_img, (x1, y1, x2, y2), frame_w, frame_h
+                face_img_raw, (x1, y1, x2, y2), frame_w, frame_h
             )
 
+            raw_blur = self.calculate_blur_score(face_img)
             metrics = {
-                "blur": self.calculate_blur_score(face_img),
-                "lighting": self.calculate_lighting_score(face_img),
+                "blur": raw_blur,
+                "blur_norm": self.normalize_blur_score(raw_blur, face_img),
+                "lighting": self.calculate_lighting_score(face_img_raw),
                 "size": self.calculate_box_size_score(face_w, face_h, frame_w, frame_h),
-                "completeness": self.check_face_completeness(face_img),
-                "eyes": self.detect_open_eyes(face_img, landmarks),
-                "frontality": self.calculate_frontality_score(face_img, landmarks),
-                "mouth": self.detect_closed_mouth(face_img),
+                "completeness": self.check_face_completeness(face_img_raw),
+                "eyes": self.detect_open_eyes(face_img_raw, local_landmarks),
+                "frontality": self.calculate_frontality_score(face_img_raw, local_landmarks),
+                "mouth": self.score_mouth_visibility(face_img_raw, local_landmarks),
             }
             metrics["combined"] = self.combined_score(metrics)
             candidates.append(

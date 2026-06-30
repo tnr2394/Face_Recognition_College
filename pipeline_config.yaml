@@ -1,3 +1,29 @@
+# Active profile: merges profiles.<name> into settings below.
+camera_profile: overhead
+
+profiles:
+  overhead:
+    person:
+      receding_peak_area_ratio: 0.92
+    face:
+      conf: 0.4
+      min_face_height_px: 28
+      gates:
+        blur: 25
+        completeness: 32
+        frontality: 42
+        eyes: 32
+        mouth: 0
+        combined: 42
+    face_ranker:
+      bbox_expand_ratio: 0.12
+      reject_half_face: false
+      check_back_facing: true
+      min_frontality_back: 35
+      min_eyes_back: 28
+      max_face_center_y_ratio: 0.65
+      head_anchor_ratio: 0.08
+
 person:
   model: yolov8n.pt
   tracker: rao_tracker.yaml
@@ -10,13 +36,10 @@ person:
   min_samples_before_flush: 1
   vid_stride: 1
   rtsp_reconnect_delay: 5
-  # Skip saving when box top is below this fraction of frame height (partial person at edge).
   max_bbox_y1_ratio: 0.72
-  # Person walking away: bbox shrinks vs track peak — flag sample, face ranker ignores it.
   receding_peak_area_ratio: 0.88
   receding_shrink_ratio: 0.97
   receding_shrink_frames: 2
-  # If false, any sample smaller than peak * ratio is receding (no shrink streak needed).
   receding_require_shrink_streak: false
   receding_min_track_samples: 2
 
@@ -30,7 +53,6 @@ face:
     conf: 0.25
     min_face_height_px: 20
     bbox_expand_ratio: 0.25
-    # reject_half_face: optional override; defaults to face_ranker.reject_half_face
   score_weights:
     blur: 0.15
     lighting: 0.1
@@ -44,7 +66,7 @@ face:
     completeness: 40
     frontality: 50
     eyes: 40
-    mouth: 40
+    mouth: 25
     combined: 50
 
 ofiq:
@@ -54,7 +76,6 @@ ofiq:
   recognition_dir: recognition_folder
   low_ofiq_dir: low_ofiq_faces
 
-# Stage 2 output — rank best faces per person; recognition is optional later
 face_ranker:
   output_dir: ranked_faces
   merge_batches_per_track: true
@@ -62,7 +83,6 @@ face_ranker:
   rank_only: true
   min_export_per_person: 1
   always_export_person: true
-  # No person_fallback export when all samples are low-edge boxes with no face.
   skip_fallback_edge_bbox: true
   max_bbox_y1_ratio: 0.72
   bbox_expand_ratio: 0.05
@@ -72,24 +92,20 @@ face_ranker:
   multi_face_blur_ratio: 0.35
   head_anchor_ratio: 0.12
   skip_receding_samples: true
-  # Back/profile filter — combined signals only (avoids false rejects at distance).
   check_back_facing: true
   max_face_center_y_ratio: 0.52
   min_frontality_back: 40
   min_eyes_back: 32
   export_only_passing_gates: true
   rejected_dir: rejected_faces
-  # Eye-based roll correction before OFIQ + export (not profile frontalization).
   align_faces: true
   align_max_angle_deg: 30
-  # With --with-recognition: only *_face_score_*.jpg (no full/person/debug/meta).
   recognition_minimal_export: true
 
 watcher:
   check_interval_sec: 3
   inactivity_wait_sec: 5
 
-# Applied after face ranking — only top-ranked faces inside ROI are exported.
 roi:
   enabled: true
   file: roi.json

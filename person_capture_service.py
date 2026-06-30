@@ -172,7 +172,8 @@ class PersonCaptureService:
         self._meta_lock = threading.Lock()
         self._staging_lock = threading.Lock()
         ensure_dir(self.queue_dir)
-        print(f"Person capture on {self.device}, queue: {self.queue_dir}")
+        profile = self.config.get("camera_profile", "standard")
+        print(f"Person capture on {self.device}, queue: {self.queue_dir}, profile: {profile}")
 
     def _prepare_roi(self, video_source, draw_roi=False):
         if not draw_roi:
