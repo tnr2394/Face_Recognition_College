@@ -50,7 +50,13 @@ class FaceRankerService:
         else:
             self.output_dir = ofiq_cfg.get("recognition_dir", "recognition_folder")
         self.merge_batches = ranker_cfg.get("merge_batches_per_track", True)
-        self.write_ready = True if recognition_mode else ranker_cfg.get("write_ready", False)
+        if recognition_mode:
+            self.write_ready = True
+        elif not self.rank_only:
+            # Recognition output path — default write_ready on unless explicitly false.
+            self.write_ready = ranker_cfg.get("write_ready", True)
+        else:
+            self.write_ready = ranker_cfg.get("write_ready", False)
         self.min_export = ranker_cfg.get("min_export_per_person", 1)
         self.always_export_person = ranker_cfg.get("always_export_person", True)
         self.skip_fallback_edge_bbox = ranker_cfg.get("skip_fallback_edge_bbox", True)

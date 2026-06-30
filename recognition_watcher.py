@@ -631,29 +631,68 @@ def mark_processed(person_dir):
 def is_processed(person_dir):
     return os.path.exists(os.path.join(person_dir, '.processed'))
 
+def folder_has_face_exports(person_dir):
+    if not os.path.isdir(person_dir):
+        return False
+    return any(
+        "_face_score_" in name and name.lower().endswith((".jpg", ".png"))
+        for name in os.listdir(person_dir)
+    )
+
 def get_pending_person_folders():
-    """Return ready person folders sorted oldest-first by .ready file time."""
+    """Return person folders ready for API recognition, oldest first."""
     if not os.path.isdir(RECOGNITION_FOLDER):
         return []
 
+    watcher_cfg = load_config().get("watcher", {})
+    require_ready = watcher_cfg.get("require_ready", False)
+
     pending = []
     for person_folder in os.listdir(RECOGNITION_FOLDER):
-        if not person_folder.startswith('person_'):
+        if not person_folder.startswith("person_"):
             continue
         person_dir = os.path.join(RECOGNITION_FOLDER, person_folder)
-        ready_file = os.path.join(person_dir, '.ready')
-        if not os.path.isdir(person_dir) or is_processed(person_dir) or not os.path.exists(ready_file):
+        if not os.path.isdir(person_dir) or is_processed(person_dir):
             continue
-        pending.append((os.path.getmtime(ready_file), person_folder, person_dir, ready_file))
+
+        ready_file = os.path.join(person_dir, ".ready")
+        has_ready = os.path.isfile(ready_file)
+        has_faces = folder_has_face_exports(person_dir)
+
+        if require_ready and not has_ready:
+            continue
+        if not has_ready and not has_faces:
+            continue
+
+        sort_mtime = (
+            os.path.getmtime(ready_file)
+            if has_ready
+            else max(
+                (
+                    os.path.getmtime(os.path.join(person_dir, name))
+                    for name in os.listdir(person_dir)
+                    if os.path.isfile(os.path.join(person_dir, name))
+                ),
+                default=0,
+            )
+        )
+        pending.append((sort_mtime, person_folder, person_dir, ready_file if has_ready else None))
 
     pending.sort(key=lambda item: item[0])
     return pending
 
 def main():
     os.makedirs(RECOGNITION_FOLDER, exist_ok=True)
+    config = load_config()
+    watcher_cfg = config.get("watcher", {})
     training_mode = is_training_mode_enabled()
     print(f"Face server: {FACE_SERVER_URL}")
     print(f"Mode: {'training (/extract)' if training_mode else 'search (/search)'}")
+    print(f"OFIQ threshold: {get_ofiq_threshold()} (pass if score >= threshold)")
+    print(
+        f"Watcher require_ready: {watcher_cfg.get('require_ready', False)} "
+        f"(false = also process folders with face exports but no .ready)"
+    )
     print(f"Watching '{RECOGNITION_FOLDER}' for new person folders...")
     while True:
         try:
@@ -664,11 +703,11 @@ def main():
                 print(f"Processing {person_dir}...")
                 process_person_folder(person_dir, person_folder, tracking_id)
                 mark_processed(person_dir)
-                # Remove the .ready file after processing
-                try:
-                    os.remove(ready_file)
-                except Exception as e:
-                    print(f"Could not delete .ready file {ready_file}: {e}")
+                if ready_file and os.path.isfile(ready_file):
+                    try:
+                        os.remove(ready_file)
+                    except Exception as e:
+                        print(f"Could not delete .ready file {ready_file}: {e}")
         except Exception as e:
             print(f"Error in main loop: {e}")
         time.sleep(CHECK_INTERVAL)
