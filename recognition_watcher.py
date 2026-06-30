@@ -576,9 +576,9 @@ def process_person_folder(person_dir, person_folder, tracking_id):
 
     threshold = get_ofiq_threshold()
     max_score = folder_max_ofiq_score(person_dir)
-    if max_score <= threshold:
+    if max_score < threshold:
         print(
-            f"Person {tracking_id} max OFIQ {max_score:.2f} <= {threshold} — "
+            f"Person {tracking_id} max OFIQ {max_score:.2f} < {threshold} — "
             f"no API/Discord, moving to {get_low_ofiq_folder()}/"
         )
         relocate_to_low_ofiq(person_dir, person_folder)

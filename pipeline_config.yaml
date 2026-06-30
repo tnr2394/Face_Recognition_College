@@ -71,7 +71,7 @@ face:
 
 ofiq:
   model: OFIQ-MODELS/models/unified_quality_score/magface_iresnet50_norm.onnx
-  threshold: 16
+  threshold: 13
   export_top_n: 2
   recognition_dir: recognition_folder
   low_ofiq_dir: low_ofiq_faces

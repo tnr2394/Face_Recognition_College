@@ -44,7 +44,7 @@ def calibrate_batch(batch_dir, config=None):
             continue
         ofiq_score = ofiq.get_score(face_result["face_crop"])
         row["ofiq"] = ofiq_score
-        row["would_export"] = ofiq_score > threshold
+        row["would_export"] = ofiq_score >= threshold
         rows.append(row)
 
     print(f"\n=== Calibration: {batch_dir} ===")

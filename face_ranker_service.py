@@ -81,6 +81,7 @@ class FaceRankerService:
         ensure_dir(self.rejected_dir)
         profile = self.config.get("camera_profile", "standard")
         print(f"Camera profile: {profile}")
+        print(f"OFIQ threshold: {self.ofiq_threshold} (pass if score >= threshold)")
         print(f"Half-face filter: {'on' if self.face_engine.reject_half_face else 'off'}")
         if self.roi:
             print(
@@ -113,7 +114,7 @@ class FaceRankerService:
     def _candidate_from_face(self, sample, face_result, tier, source):
         ofiq_score = self.ofiq.get_score(face_result["face_crop"])
         combined = face_result["metrics"]["combined"]
-        passes_ofiq = ofiq_score > self.ofiq_threshold
+        passes_ofiq = ofiq_score >= self.ofiq_threshold
         gate = face_result.get("gate_reject") or "ok"
         if not passes_ofiq:
             gate = gate if gate != "ok" else "below_ofiq"
@@ -553,7 +554,7 @@ class FaceRankerService:
         to_export = below[:export_count]
         self._write_exports(out_dir, to_export)
         print(
-            f"  below OFIQ (<= {self.ofiq_threshold}) -> {out_dir} "
+            f"  below OFIQ (< {self.ofiq_threshold}) -> {out_dir} "
             f"({len(to_export)} face(s))"
         )
         return len(to_export)
@@ -623,24 +624,58 @@ class FaceRankerService:
             f"gated={stats.get('gated', 0)}"
         )
 
-    def _primary_rejection_reason(
-        self, stats, rejected, candidates, *, low_ofiq_n=0, outside_roi_n=0
-    ):
-        """Pick the dominant reason this batch did not reach recognition."""
-        reason_counts = Counter()
-        for item in rejected:
-            reason_counts[item.get("reason", "unknown")] += 1
-        for candidate in candidates or []:
-            gate = candidate.get("gate")
-            if gate and gate != "ok":
-                reason_counts[gate] += 1
-        if outside_roi_n > 0:
-            reason_counts["outside_roi"] += outside_roi_n
-        if low_ofiq_n > 0:
-            reason_counts["below_ofiq"] += low_ofiq_n
+    def _recognition_diagnosis(self, candidates):
+        """Summarize OFIQ/ROI state for reject reports."""
+        if not candidates:
+            return {}
+        passing = [c for c in candidates if c.get("gate") == "ok"]
+        below = [c for c in candidates if c.get("gate") == "below_ofiq"]
+        in_roi = [c for c in passing if self._candidate_in_roi(c)]
+        outside = [c for c in passing if not self._candidate_in_roi(c)]
+        diagnosis = {
+            "passing_ofiq_count": len(passing),
+            "below_ofiq_count": len(below),
+            "passing_in_roi_count": len(in_roi),
+            "outside_roi_count": len(outside),
+        }
+        if passing:
+            best = max(passing, key=lambda c: c["rank"])
+            diagnosis["best_passing"] = {
+                "frame": best["frame_num"],
+                "ofiq": best.get("ofiq", 0),
+                "in_roi": self._candidate_in_roi(best),
+                "source": best.get("source"),
+            }
+        if below:
+            best_below = max(below, key=lambda c: c.get("ofiq", 0))
+            diagnosis["best_below_ofiq"] = {
+                "frame": best_below["frame_num"],
+                "ofiq": best_below.get("ofiq", 0),
+            }
+        return diagnosis
 
-        if reason_counts:
-            return reason_counts.most_common(1)[0][0]
+    def _recognition_failure_reason(self, candidates, exported_count, stats, rejected):
+        """
+        Why nothing reached recognition_folder — not why alternate folders have files.
+        """
+        if exported_count > 0:
+            return None
+
+        passing = [c for c in (candidates or []) if c.get("gate") == "ok"]
+        if passing:
+            in_roi = [c for c in passing if self._candidate_in_roi(c)]
+            if not in_roi:
+                return "outside_roi"
+            return "export_failed"
+
+        below = [c for c in (candidates or []) if c.get("gate") == "below_ofiq"]
+        if below:
+            return "below_ofiq"
+
+        if rejected:
+            return Counter(
+                item.get("reason", "unknown") for item in rejected
+            ).most_common(1)[0][0]
 
         if stats.get("no_face"):
             return "no_face"
@@ -675,12 +710,8 @@ class FaceRankerService:
         if not samples:
             return
 
-        primary_reason = primary_reason or self._primary_rejection_reason(
-            stats,
-            rejected,
-            candidates,
-            low_ofiq_n=low_ofiq_n,
-            outside_roi_n=outside_roi_n,
+        primary_reason = primary_reason or self._recognition_failure_reason(
+            candidates, 0, stats, rejected
         )
         out_dir = self._rejected_dir_for_batch(folder_name)
         os.makedirs(out_dir, exist_ok=True)
@@ -718,11 +749,13 @@ class FaceRankerService:
         summary = {
             "batch": folder_name,
             "primary_reason": primary_reason,
+            "ofiq_threshold": self.ofiq_threshold,
             "camera_profile": self.config.get("camera_profile", "standard"),
             "queue_dir": os.path.abspath(batch_dir),
             "stats": stats,
             "best_sample_frame": frame_num,
             "alternate_dirs": alternate_dirs or {},
+            "recognition_diagnosis": self._recognition_diagnosis(candidates),
             "candidate_gates": [
                 {
                     "frame": c["frame_num"],
@@ -746,28 +779,25 @@ class FaceRankerService:
 
         reason_line = (
             f"PRIMARY REASON: {primary_reason}\n"
+            f"OFIQ threshold: {self.ofiq_threshold} (pass if score >= threshold)\n"
             f"{self._format_reject_stats(stats, len(samples))}\n"
         )
-        if rejected:
-            best = max(
-                rejected,
-                key=lambda item: (item.get("metrics") or {}).get("combined", 0),
-            )
-            m = best.get("metrics") or {}
+        diagnosis = self._recognition_diagnosis(candidates)
+        if diagnosis.get("best_passing"):
+            bp = diagnosis["best_passing"]
             reason_line += (
-                f"Best attempt frame {best['frame_num']} ({best['reason']}): "
-                f"blur_norm={m.get('blur_norm', m.get('blur', 0)):.1f}, "
-                f"frontality={m.get('frontality', 0):.1f}, "
-                f"eyes={m.get('eyes', 0):.1f}, "
-                f"mouth={m.get('mouth', 0):.1f}, "
-                f"combined={m.get('combined', 0):.1f}\n"
+                f"Best OFIQ-passing frame {bp['frame']}: ofiq={bp['ofiq']:.2f}, "
+                f"in_roi={bp['in_roi']}, source={bp.get('source')}\n"
             )
-        elif candidates:
-            best = max(candidates, key=lambda c: c["rank"])
-            m = best.get("combined", 0)
+        if diagnosis.get("below_ofiq_count"):
             reason_line += (
-                f"Best candidate frame {best['frame_num']}: gate={best.get('gate')}, "
-                f"ofiq={best.get('ofiq', 0):.2f}, combined={m:.1f}\n"
+                f"Also exported {diagnosis['below_ofiq_count']} lower-OFIQ frame(s) "
+                f"to low_ofiq_faces (not the recognition blocker if a passing face exists)\n"
+            )
+        if diagnosis.get("outside_roi_count"):
+            reason_line += (
+                f"OFIQ-passing outside ROI: {diagnosis['outside_roi_count']} frame(s) "
+                f"-> outside_roi_faces\n"
             )
         if alternate_dirs:
             for label, path in alternate_dirs.items():
@@ -820,7 +850,7 @@ class FaceRankerService:
                 samples,
                 stats,
                 rejected,
-                primary_reason=self._primary_rejection_reason(stats, rejected, []),
+                primary_reason=self._recognition_failure_reason([], 0, stats, rejected),
             )
             self._cleanup_empty_recognition_folder(out_dir)
             print(
@@ -876,12 +906,8 @@ class FaceRankerService:
             return True
 
         self._cleanup_empty_recognition_folder(out_dir)
-        primary_reason = self._primary_rejection_reason(
-            stats,
-            rejected,
-            candidates,
-            low_ofiq_n=low_ofiq_n,
-            outside_roi_n=outside_roi_n,
+        primary_reason = self._recognition_failure_reason(
+            candidates, exported_count, stats, rejected
         )
         self._export_rejected_batch(
             batch_dir,
