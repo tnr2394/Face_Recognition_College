@@ -425,13 +425,31 @@ class FaceQualityEngine:
         return clamp_bbox(x1 - pad_x, y1 - pad_y, x2 + pad_x, y2 + pad_y, frame_w, frame_h)
 
     def expand_face_crop_bbox(self, face_box, frame_w, frame_h):
-        """Pad face detector box before export so FaceNet/MTCNN has margin (legacy used ~35px)."""
+        """Legacy helper — export padding is applied on the aligned chip, not the source frame."""
         return self.expand_bbox(
             face_box,
             frame_w,
             frame_h,
             self.face_crop_expand_ratio,
             self.face_crop_expand_min_px,
+        )
+
+    def pad_face_crop_for_export(self, face_img):
+        """Add margin around the aligned tight crop for FaceNet/MTCNN (after all quality steps)."""
+        if face_img is None or face_img.size == 0:
+            return face_img
+        if self.face_crop_expand_ratio <= 0 and self.face_crop_expand_min_px <= 0:
+            return face_img
+        h, w = face_img.shape[:2]
+        pad_x = max(self.face_crop_expand_min_px, int(w * self.face_crop_expand_ratio))
+        pad_y = max(self.face_crop_expand_min_px, int(h * self.face_crop_expand_ratio))
+        return cv2.copyMakeBorder(
+            face_img,
+            pad_y,
+            pad_y,
+            pad_x,
+            pad_x,
+            cv2.BORDER_REPLICATE,
         )
 
     @staticmethod
@@ -576,7 +594,10 @@ class FaceQualityEngine:
             else:
                 candidate["_area_ratio"] = 0.0
             if self.ofiq_scorer is not None:
-                candidate["_ofiq"] = self.ofiq_scorer.get_score(candidate["face_crop"])
+                ofiq_crop = candidate.get("face_crop_tight")
+                if ofiq_crop is None:
+                    ofiq_crop = candidate["face_crop"]
+                candidate["_ofiq"] = self.ofiq_scorer.get_score(ofiq_crop)
             else:
                 candidate["_ofiq"] = 0.0
             if anchor is not None:
@@ -649,36 +670,30 @@ class FaceQualityEngine:
             face_img_raw = image[y1:y2, x1:x2].copy()
             landmarks = self._extract_landmarks(detections, i)
             local_landmarks = self._landmarks_in_crop(landmarks, x1, y1)
-            # Quality metrics on tight detector box; export crop is padded for FaceNet.
-            if self.face_crop_expand_ratio > 0 or self.face_crop_expand_min_px > 0:
-                ecx1, ecy1, ecx2, ecy2 = self.expand_face_crop_bbox(
-                    (x1, y1, x2, y2), frame_w, frame_h
-                )
-                face_export_raw = image[ecy1:ecy2, ecx1:ecx2].copy()
-                face_img = self._prepare_face_crop(face_export_raw, landmarks, ecx1, ecy1)
-            else:
-                face_img = self._prepare_face_crop(face_img_raw, landmarks, x1, y1)
+            # Tight crop: detect → score → align; padding only on final export chip.
+            face_aligned = self._prepare_face_crop(face_img_raw, landmarks, x1, y1)
+            face_export = self.pad_face_crop_for_export(face_aligned)
             half_face = bool(
                 reject_half
                 and self.is_half_face(face_img_raw, (x1, y1, x2, y2), frame_w, frame_h)
             )
 
-            raw_blur = self.calculate_blur_score(face_img)
+            raw_blur = self.calculate_blur_score(face_aligned)
             metrics = {
                 "blur": raw_blur,
-                "blur_norm": self.normalize_blur_score(raw_blur, face_img),
-                "lighting": self.calculate_lighting_score(face_img_raw),
+                "blur_norm": self.normalize_blur_score(raw_blur, face_aligned),
+                "lighting": self.calculate_lighting_score(face_aligned),
                 "size": self.calculate_box_size_score(face_w, face_h, frame_w, frame_h),
-                "completeness": self.check_face_completeness(face_img_raw),
-                "eyes": self.detect_open_eyes(face_img_raw, local_landmarks),
-                "frontality": self.calculate_frontality_score(face_img_raw, local_landmarks),
-                "mouth": self.score_mouth_visibility(face_img_raw, local_landmarks),
+                "completeness": self.check_face_completeness(face_aligned),
+                "eyes": self.detect_open_eyes(face_aligned, local_landmarks),
+                "frontality": self.calculate_frontality_score(face_aligned, local_landmarks),
+                "mouth": self.score_mouth_visibility(face_aligned, local_landmarks),
             }
             metrics["combined"] = self.combined_score(metrics)
             candidates.append(
                 {
-                    "face_crop": face_img,
-                    "face_crop_tight": face_img_raw,
+                    "face_crop": face_export,
+                    "face_crop_tight": face_aligned,
                     "face_box": full_box,
                     "conf": float(box.conf[0]),
                     "landmarks": landmarks,

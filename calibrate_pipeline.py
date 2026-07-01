@@ -42,7 +42,10 @@ def calibrate_batch(batch_dir, config=None):
         if reject:
             rows.append(row)
             continue
-        ofiq_score = ofiq.get_score(face_result["face_crop"])
+        ofiq_crop = face_result.get("face_crop_tight")
+        if ofiq_crop is None:
+            ofiq_crop = face_result["face_crop"]
+        ofiq_score = ofiq.get_score(ofiq_crop)
         row["ofiq"] = ofiq_score
         row["would_export"] = ofiq_score >= threshold
         rows.append(row)
