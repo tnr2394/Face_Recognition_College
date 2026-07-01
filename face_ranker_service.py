@@ -33,6 +33,14 @@ RANK_MANIFEST = "_rank_manifest.json"
 FACE_CACHE_DIR = ".face_cache"
 
 
+def _ofiq_input_crop(face_result):
+    """Pick tight crop for OFIQ; never use `or` — numpy images are ambiguous in boolean context."""
+    tight = face_result.get("face_crop_tight")
+    if tight is not None:
+        return tight
+    return face_result["face_crop"]
+
+
 class FaceRankerService:
     def __init__(self, config=None):
         self.config = config or load_config()
@@ -120,7 +128,7 @@ class FaceRankerService:
         }
 
     def _candidate_from_face(self, sample, face_result, tier, source):
-        ofiq_crop = face_result.get("face_crop_tight") or face_result["face_crop"]
+        ofiq_crop = _ofiq_input_crop(face_result)
         ofiq_score = self.ofiq.get_score(ofiq_crop)
         combined = face_result["metrics"]["combined"]
         passes_ofiq = ofiq_score >= self.ofiq_threshold
