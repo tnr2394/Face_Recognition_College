@@ -425,7 +425,7 @@ class FaceQualityEngine:
         return clamp_bbox(x1 - pad_x, y1 - pad_y, x2 + pad_x, y2 + pad_y, frame_w, frame_h)
 
     def expand_face_crop_bbox(self, face_box, frame_w, frame_h):
-        """Legacy helper — export padding is applied on the aligned chip, not the source frame."""
+        """Widen face bbox in frame coordinates — export uses real pixels from the source image."""
         return self.expand_bbox(
             face_box,
             frame_w,
@@ -434,23 +434,22 @@ class FaceQualityEngine:
             self.face_crop_expand_min_px,
         )
 
-    def pad_face_crop_for_export(self, face_img):
-        """Add margin around the aligned tight crop for FaceNet/MTCNN (after all quality steps)."""
-        if face_img is None or face_img.size == 0:
-            return face_img
+    def crop_face_export_from_frame(self, image, x1, y1, x2, y2, frame_w, frame_h, landmarks):
+        """
+        Export crop for FaceNet: expanded bbox cut from the original frame (no synthetic borders).
+        Alignment runs on this frame crop only — gates/OFIQ stay on the tight crop separately.
+        """
         if self.face_crop_expand_ratio <= 0 and self.face_crop_expand_min_px <= 0:
-            return face_img
-        h, w = face_img.shape[:2]
-        pad_x = max(self.face_crop_expand_min_px, int(w * self.face_crop_expand_ratio))
-        pad_y = max(self.face_crop_expand_min_px, int(h * self.face_crop_expand_ratio))
-        return cv2.copyMakeBorder(
-            face_img,
-            pad_y,
-            pad_y,
-            pad_x,
-            pad_x,
-            cv2.BORDER_REPLICATE,
-        )
+            ex1, ey1, ex2, ey2 = x1, y1, x2, y2
+        else:
+            ex1, ey1, ex2, ey2 = self.expand_face_crop_bbox(
+                (x1, y1, x2, y2), frame_w, frame_h
+            )
+        export_raw = image[ey1:ey2, ex1:ex2].copy()
+        if export_raw.size == 0:
+            export_raw = image[y1:y2, x1:x2].copy()
+            ex1, ey1 = x1, y1
+        return self._prepare_face_crop(export_raw, landmarks, ex1, ey1)
 
     @staticmethod
     def _landmarks_in_crop(landmarks, crop_x1, crop_y1):
@@ -670,9 +669,11 @@ class FaceQualityEngine:
             face_img_raw = image[y1:y2, x1:x2].copy()
             landmarks = self._extract_landmarks(detections, i)
             local_landmarks = self._landmarks_in_crop(landmarks, x1, y1)
-            # Tight crop: detect → score → align; padding only on final export chip.
+            # Tight crop: score + align for gates/OFIQ. Export = wider cut from original frame only.
             face_aligned = self._prepare_face_crop(face_img_raw, landmarks, x1, y1)
-            face_export = self.pad_face_crop_for_export(face_aligned)
+            face_export = self.crop_face_export_from_frame(
+                image, x1, y1, x2, y2, frame_w, frame_h, landmarks
+            )
             half_face = bool(
                 reject_half
                 and self.is_half_face(face_img_raw, (x1, y1, x2, y2), frame_w, frame_h)
