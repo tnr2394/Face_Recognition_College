@@ -23,6 +23,8 @@ class FaceQualityEngine:
         self.edge_margin = 20
         ranker_cfg = config.get("face_ranker", {})
         self.bbox_expand_ratio = ranker_cfg.get("bbox_expand_ratio", 0.05)
+        self.face_crop_expand_ratio = ranker_cfg.get("face_crop_expand_ratio", 0.20)
+        self.face_crop_expand_min_px = ranker_cfg.get("face_crop_expand_min_px", 20)
         self.reject_half_face = ranker_cfg.get("reject_half_face", False)
         self.max_face_area_ratio = ranker_cfg.get("max_face_area_ratio", 0.22)
         self.min_face_person_overlap = ranker_cfg.get("min_face_person_overlap", 0.12)
@@ -383,12 +385,22 @@ class FaceQualityEngine:
             return None
 
     @staticmethod
-    def expand_bbox(bbox, frame_w, frame_h, ratio):
+    def expand_bbox(bbox, frame_w, frame_h, ratio, min_pad_px=0):
         x1, y1, x2, y2 = bbox
         bw, bh = x2 - x1, y2 - y1
-        pad_x = int(bw * ratio)
-        pad_y = int(bh * ratio)
+        pad_x = max(min_pad_px, int(bw * ratio))
+        pad_y = max(min_pad_px, int(bh * ratio))
         return clamp_bbox(x1 - pad_x, y1 - pad_y, x2 + pad_x, y2 + pad_y, frame_w, frame_h)
+
+    def expand_face_crop_bbox(self, face_box, frame_w, frame_h):
+        """Pad face detector box before export so FaceNet/MTCNN has margin (legacy used ~35px)."""
+        return self.expand_bbox(
+            face_box,
+            frame_w,
+            frame_h,
+            self.face_crop_expand_ratio,
+            self.face_crop_expand_min_px,
+        )
 
     @staticmethod
     def _landmarks_in_crop(landmarks, crop_x1, crop_y1):
@@ -608,7 +620,15 @@ class FaceQualityEngine:
             face_img_raw = image[y1:y2, x1:x2].copy()
             landmarks = self._extract_landmarks(detections, i)
             local_landmarks = self._landmarks_in_crop(landmarks, x1, y1)
-            face_img = self._prepare_face_crop(face_img_raw, landmarks, x1, y1)
+            # Quality metrics on tight detector box; export crop is padded for FaceNet.
+            if self.face_crop_expand_ratio > 0 or self.face_crop_expand_min_px > 0:
+                ecx1, ecy1, ecx2, ecy2 = self.expand_face_crop_bbox(
+                    (x1, y1, x2, y2), frame_w, frame_h
+                )
+                face_export_raw = image[ecy1:ecy2, ecx1:ecx2].copy()
+                face_img = self._prepare_face_crop(face_export_raw, landmarks, ecx1, ecy1)
+            else:
+                face_img = self._prepare_face_crop(face_img_raw, landmarks, x1, y1)
             half_face = reject_half and self.is_half_face(
                 face_img_raw, (x1, y1, x2, y2), frame_w, frame_h
             )
@@ -628,6 +648,7 @@ class FaceQualityEngine:
             candidates.append(
                 {
                     "face_crop": face_img,
+                    "face_crop_tight": face_img_raw,
                     "face_box": full_box,
                     "conf": float(box.conf[0]),
                     "landmarks": landmarks,

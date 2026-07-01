@@ -119,7 +119,8 @@ class FaceRankerService:
         }
 
     def _candidate_from_face(self, sample, face_result, tier, source):
-        ofiq_score = self.ofiq.get_score(face_result["face_crop"])
+        ofiq_crop = face_result.get("face_crop_tight") or face_result["face_crop"]
+        ofiq_score = self.ofiq.get_score(ofiq_crop)
         combined = face_result["metrics"]["combined"]
         passes_ofiq = ofiq_score >= self.ofiq_threshold
         gate = face_result.get("gate_reject") or "ok"
