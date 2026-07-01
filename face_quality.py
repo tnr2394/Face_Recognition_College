@@ -56,6 +56,32 @@ class FaceQualityEngine:
         )[0]
 
     @staticmethod
+    def _landmark_xy(landmarks):
+        """Return four scalar eye coordinates or None."""
+        if landmarks is None:
+            return None
+        try:
+            if len(landmarks) < 4:
+                return None
+            return (
+                float(np.asarray(landmarks[0]).reshape(-1)[0]),
+                float(np.asarray(landmarks[1]).reshape(-1)[0]),
+                float(np.asarray(landmarks[2]).reshape(-1)[0]),
+                float(np.asarray(landmarks[3]).reshape(-1)[0]),
+            )
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _scalar_metric(value, default=0.0):
+        if value is None:
+            return default
+        try:
+            return float(np.asarray(value).reshape(-1)[0])
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
     def calculate_blur_score(img):
         if img.size == 0:
             return 0.0
@@ -123,7 +149,8 @@ class FaceQualityEngine:
         try:
             if img.size == 0:
                 return 0.0
-            if landmarks is None or len(landmarks) < 4:
+            coords = self._landmark_xy(landmarks)
+            if coords is None:
                 face = cv2.resize(img, (64, 64))
                 gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
                 left_half = gray[:, :32]
@@ -135,8 +162,8 @@ class FaceQualityEngine:
                 aspect_score = 1.0 - min(1.0, abs((w / h if h > 0 else 0) - 0.8) / 0.4)
                 return (symmetry * 0.7 + aspect_score * 0.3) * 100
 
-            left_eye = (landmarks[0], landmarks[1])
-            right_eye = (landmarks[2], landmarks[3])
+            left_eye = (coords[0], coords[1])
+            right_eye = (coords[2], coords[3])
             eye_dx = abs(right_eye[0] - left_eye[0])
             eye_dy = abs(right_eye[1] - left_eye[1])
             horizontal_alignment = max(0, 1.0 - (eye_dy / eye_dx if eye_dx > 0 else 1.0))
@@ -148,13 +175,15 @@ class FaceQualityEngine:
             ratio_target = 0.38 if self.camera_profile == "overhead" else 0.43
             ratio_tolerance = 0.35 if self.camera_profile == "overhead" else 0.2
             distance_score = 1.0 - min(1.0, abs(distance_ratio - ratio_target) / ratio_tolerance)
-            return min(
-                100,
-                max(
-                    0,
-                    (horizontal_alignment * 0.4 + center_alignment * 0.4 + distance_score * 0.2)
-                    * 100,
-                ),
+            return float(
+                min(
+                    100,
+                    max(
+                        0,
+                        (horizontal_alignment * 0.4 + center_alignment * 0.4 + distance_score * 0.2)
+                        * 100,
+                    ),
+                )
             )
         except Exception:
             return 50.0
@@ -164,29 +193,30 @@ class FaceQualityEngine:
             if img.size == 0:
                 return 0.0
             h, w = img.shape[:2]
-            if landmarks is None or len(landmarks) < 4:
+            coords = self._landmark_xy(landmarks)
+            if coords is None:
                 left_eye_region = img[int(h * 0.2) : int(h * 0.45), int(w * 0.15) : int(w * 0.45)]
                 right_eye_region = img[int(h * 0.2) : int(h * 0.45), int(w * 0.55) : int(w * 0.85)]
                 if left_eye_region.size == 0 or right_eye_region.size == 0:
                     return 50.0
             else:
-                eye_width = int(abs(landmarks[2] - landmarks[0]) * 0.3)
+                eye_width = int(abs(coords[2] - coords[0]) * 0.3)
                 eye_height = int(eye_width * 0.5)
-                left_x1 = max(0, int(landmarks[0] - eye_width / 2))
-                left_y1 = max(0, int(landmarks[1] - eye_height / 2))
-                left_x2 = min(w, int(landmarks[0] + eye_width / 2))
-                left_y2 = min(h, int(landmarks[1] + eye_height / 2))
-                right_x1 = max(0, int(landmarks[2] - eye_width / 2))
-                right_y1 = max(0, int(landmarks[3] - eye_height / 2))
-                right_x2 = min(w, int(landmarks[2] + eye_width / 2))
-                right_y2 = min(h, int(landmarks[3] + eye_height / 2))
+                left_x1 = max(0, int(coords[0] - eye_width / 2))
+                left_y1 = max(0, int(coords[1] - eye_height / 2))
+                left_x2 = min(w, int(coords[0] + eye_width / 2))
+                left_y2 = min(h, int(coords[1] + eye_height / 2))
+                right_x1 = max(0, int(coords[2] - eye_width / 2))
+                right_y1 = max(0, int(coords[3] - eye_height / 2))
+                right_x2 = min(w, int(coords[2] + eye_width / 2))
+                right_y2 = min(h, int(coords[3] + eye_height / 2))
                 left_eye_region = img[left_y1:left_y2, left_x1:left_x2]
                 right_eye_region = img[right_y1:right_y2, right_x1:right_x2]
                 if left_eye_region.size == 0 or right_eye_region.size == 0:
-                    return (
-                        np.sqrt((landmarks[0] - landmarks[2]) ** 2 + (landmarks[1] - landmarks[3]) ** 2)
-                        / w
-                    ) * 500
+                    return float(
+                        (np.sqrt((coords[0] - coords[2]) ** 2 + (coords[1] - coords[3]) ** 2) / w)
+                        * 500
+                    )
 
             left_gray = cv2.cvtColor(left_eye_region, cv2.COLOR_BGR2GRAY)
             right_gray = cv2.cvtColor(right_eye_region, cv2.COLOR_BGR2GRAY)
@@ -198,7 +228,7 @@ class FaceQualityEngine:
             right_edge_density = np.count_nonzero(right_edges) / right_edges.size
             var_score = min(100, max(0, ((left_var + right_var) / 2) * 0.4))
             edge_score = min(100, max(0, ((left_edge_density + right_edge_density) / 2) * 1000))
-            return min(100, max(0, var_score * 0.7 + edge_score * 0.3))
+            return float(min(100, max(0, var_score * 0.7 + edge_score * 0.3)))
         except Exception:
             return 50.0
 
@@ -206,10 +236,11 @@ class FaceQualityEngine:
     def _mouth_roi(face_img, landmarks=None):
         """Mouth region — landmark-based when available, else proportional band."""
         h, w = face_img.shape[:2]
-        if landmarks is not None and len(landmarks) >= 4:
-            eye_cy = (landmarks[1] + landmarks[3]) / 2
-            eye_cx = (landmarks[0] + landmarks[2]) / 2
-            eye_dist = max(4.0, abs(landmarks[2] - landmarks[0]))
+        coords = FaceQualityEngine._landmark_xy(landmarks)
+        if coords is not None:
+            eye_cy = (coords[1] + coords[3]) / 2
+            eye_cx = (coords[0] + coords[2]) / 2
+            eye_dist = max(4.0, abs(coords[2] - coords[0]))
             mouth_cy = eye_cy + 0.9 * eye_dist
             half_h = 0.45 * eye_dist
             half_w = 0.65 * eye_dist
@@ -311,7 +342,7 @@ class FaceQualityEngine:
     def passes_gates(self, metrics):
         blur_gate = self.gates.get("blur", 0)
         if blur_gate > 0:
-            blur_val = metrics.get("blur_norm", metrics.get("blur", 0))
+            blur_val = self._scalar_metric(metrics.get("blur_norm", metrics.get("blur", 0)))
             if blur_val < blur_gate:
                 return "low_blur"
         gate_checks = (
@@ -323,7 +354,8 @@ class FaceQualityEngine:
         )
         for metric_key, reject_reason in gate_checks:
             threshold = self.gates.get(metric_key, 0)
-            if threshold > 0 and metrics.get(metric_key, 0) < threshold:
+            metric_val = self._scalar_metric(metrics.get(metric_key, 0))
+            if threshold > 0 and metric_val < threshold:
                 return reject_reason
         return None
 
@@ -352,12 +384,12 @@ class FaceQualityEngine:
             return None
 
         metrics = face.get("metrics") or {}
-        frontality = metrics.get("frontality", 0)
-        eyes = metrics.get("eyes", 0)
+        frontality = self._scalar_metric(metrics.get("frontality", 0))
+        eyes = self._scalar_metric(metrics.get("eyes", 0))
         very_low_front = frontality < self.min_frontality_back * 0.7
         low_front = frontality < self.min_frontality_back
         low_eyes = eyes < self.min_eyes_back
-        head_ok = self.is_face_in_head_region(face["face_box"], person_meta)
+        head_ok = bool(self.is_face_in_head_region(face["face_box"], person_meta))
 
         if very_low_front:
             return "back_facing_low_frontality"
@@ -404,13 +436,14 @@ class FaceQualityEngine:
 
     @staticmethod
     def _landmarks_in_crop(landmarks, crop_x1, crop_y1):
-        if landmarks is None or len(landmarks) < 4:
+        coords = FaceQualityEngine._landmark_xy(landmarks)
+        if coords is None:
             return None
         return [
-            landmarks[0] - crop_x1,
-            landmarks[1] - crop_y1,
-            landmarks[2] - crop_x1,
-            landmarks[3] - crop_y1,
+            coords[0] - crop_x1,
+            coords[1] - crop_y1,
+            coords[2] - crop_x1,
+            coords[3] - crop_y1,
         ]
 
     def align_face_roll(self, face_img, landmarks):
@@ -419,24 +452,20 @@ class FaceQualityEngine:
         Does not frontalize side/profile faces — only levels head tilt.
         """
         try:
-            if landmarks is None or len(landmarks) < 4:
+            coords = self._landmark_xy(landmarks)
+            if coords is None:
                 return face_img
 
             h, w = face_img.shape[:2]
             if h == 0 or w == 0:
                 return face_img
 
-            left_eye = np.array([landmarks[0], landmarks[1]])
-            right_eye = np.array([landmarks[2], landmarks[3]])
-
-            if (
-                not (0 <= left_eye[0] < w and 0 <= left_eye[1] < h)
-                or not (0 <= right_eye[0] < w and 0 <= right_eye[1] < h)
-            ):
+            lx, ly, rx, ry = coords
+            if not (0 <= lx < w and 0 <= ly < h and 0 <= rx < w and 0 <= ry < h):
                 return face_img
 
-            dy = right_eye[1] - left_eye[1]
-            dx = right_eye[0] - left_eye[0]
+            dy = ry - ly
+            dx = rx - lx
             angle = float(np.degrees(np.arctan2(dy, dx)))
             if abs(angle) > self.align_max_angle_deg:
                 return face_img
@@ -560,7 +589,7 @@ class FaceQualityEngine:
         def rank_key(candidate):
             oversize = max(0.0, candidate["_area_ratio"] - self.max_face_area_ratio)
             metrics = candidate["metrics"]
-            half_penalty = 1 if candidate.get("half_face") else 0
+            half_penalty = 1 if bool(candidate.get("half_face")) else 0
             return (
                 metrics["blur"],
                 candidate["_ofiq"],
@@ -629,8 +658,9 @@ class FaceQualityEngine:
                 face_img = self._prepare_face_crop(face_export_raw, landmarks, ecx1, ecy1)
             else:
                 face_img = self._prepare_face_crop(face_img_raw, landmarks, x1, y1)
-            half_face = reject_half and self.is_half_face(
-                face_img_raw, (x1, y1, x2, y2), frame_w, frame_h
+            half_face = bool(
+                reject_half
+                and self.is_half_face(face_img_raw, (x1, y1, x2, y2), frame_w, frame_h)
             )
 
             raw_blur = self.calculate_blur_score(face_img)
@@ -752,7 +782,7 @@ class FaceQualityEngine:
         if back_reason:
             face["gate_reject"] = back_reason
             return face, "back_facing"
-        if self.reject_half_face and face.get("half_face"):
+        if self.reject_half_face and bool(face.get("half_face")):
             face["gate_reject"] = face.get("gate_reject") or "half_face"
         else:
             face["gate_reject"] = self.passes_gates(face["metrics"])
@@ -779,7 +809,7 @@ class FaceQualityEngine:
         if back_reason:
             face["gate_reject"] = back_reason
             return face, "back_facing"
-        if lenient_reject_half and face.get("half_face"):
+        if lenient_reject_half and bool(face.get("half_face")):
             face["gate_reject"] = face.get("gate_reject") or "half_face"
         else:
             face["gate_reject"] = self.passes_gates(face["metrics"])

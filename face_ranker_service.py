@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import time
+import traceback
 from collections import Counter
 
 import cv2
@@ -968,6 +969,7 @@ class FaceRankerService:
                 self.run_once()
             except Exception as e:
                 print(f"Face ranker error: {e}")
+                traceback.print_exc()
             time.sleep(self.check_interval)
 
 
