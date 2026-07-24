@@ -7,14 +7,14 @@ profiles:
       receding_peak_area_ratio: 0.92
     face:
       conf: 0.4
-      min_face_height_px: 28
+      min_face_height_px: 20
       gates:
         blur: 25
-        completeness: 32
-        frontality: 42
-        eyes: 32
+        completeness: 20
+        frontality: 20
+        eyes: 20
         mouth: 0
-        combined: 42
+        combined: 25
     face_ranker:
       bbox_expand_ratio: 0.12
       face_crop_expand_ratio: 0.25
@@ -31,11 +31,27 @@ person:
   tracker: rao_tracker.yaml
   conf: 0.4
   queue_dir: person_queue
+  staging_subdir: .staging
+  # Wipe person_queue / recognition_folder / etc. on capture start so track IDs
+  # restarting at 1 after PM2 restart do not hit old .processed folders.
+  clear_pipeline_on_start: true
   min_box_area_ratio: 0.002
-  max_samples: 15
-  flush_interval_sec: 18
-  flush_stable_sec: 4
+  max_samples: 12
+  # First batch for a new track (passer-by); follow-up batches use flush_interval_sec
+  first_flush_sec: 5
+  flush_interval_sec: 10
+  flush_stable_sec: 3
   min_samples_before_flush: 1
+  # After first flush, do not interval-flush same track again while they stay in frame
+  track_resit_cooldown_sec: 60
+  jpeg_quality: 70
+  # Only buffer 1 of every N tracked frames per person (tracking still runs every frame)
+  sample_stride: 2
+  # ByteTrack ID-swap guard: if IoU with last box drops below this, discard buffer
+  id_break_min_iou: 0.12
+  # Center jump as fraction of frame diagonal also forces identity break
+  id_break_max_center_frac: 0.22
+  writer_queue_size: 48
   vid_stride: 1
   rtsp_reconnect_delay: 5
   max_bbox_y1_ratio: 0.72
@@ -73,14 +89,15 @@ face:
 
 ofiq:
   model: OFIQ-MODELS/models/unified_quality_score/magface_iresnet50_norm.onnx
-  threshold: 13
+  threshold: 5
   export_top_n: 2
   recognition_dir: recognition_folder
   low_ofiq_dir: low_ofiq_faces
 
 face_ranker:
   output_dir: ranked_faces
-  merge_batches_per_track: true
+  # false: each queue batch -> its own recognition folder (avoids mixing when ByteTrack reuses IDs)
+  merge_batches_per_track: false
   write_ready: true
   rank_only: false
   min_export_per_person: 1
@@ -88,12 +105,12 @@ face_ranker:
   skip_fallback_edge_bbox: true
   max_bbox_y1_ratio: 0.72
   bbox_expand_ratio: 0.05
-  # Padding around YOLO face box on exported crops (FaceNet/MTCNN needs margin; legacy used 35px)
+  # Widen export bbox using real full-frame pixels (not synthetic border padding). 0 = tight crop only.
   face_crop_expand_ratio: 0.20
   face_crop_expand_min_px: 20
   reject_half_face: false
   max_face_area_ratio: 0.22
-  min_face_person_overlap: 0.12
+  min_face_person_overlap: 0.35
   multi_face_blur_ratio: 0.35
   head_anchor_ratio: 0.12
   skip_receding_samples: true
@@ -114,10 +131,10 @@ watcher:
   require_ready: false
   # Camera label in dashboard recognition logs (VideoName); override with PIPELINE_VIDEO_SOURCE env
   video_source: ""
-  # face_server_url: "http://192.170.1.114:4445"
+  # face_server_url: "http://localhost:4445"
 
 roi:
-  enabled: true
+  enabled: false
   file: roi.json
   outside_roi_dir: outside_roi_faces
   face_mode: overlap

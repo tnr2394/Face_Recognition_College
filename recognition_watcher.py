@@ -17,7 +17,7 @@ from cooldown_state import (
 )
 from pipeline_io import load_config
 
-FACE_SERVER_URL = "http://192.170.1.114:4445"
+FACE_SERVER_URL = "http://localhost:4445"
 TRAINING_MODE_CACHE_SECONDS = 30
 _training_mode_cache = {'value': None, 'checked_at': 0}
 DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1143427649243459584/NhuVUtPoNnMBlBlBXKTKFppZiFyBOTWYbzwxSXZb5MJm-NrSK30rW4DcV3Rwx19d6rRT"
@@ -717,7 +717,9 @@ def process_person_folder(person_dir, person_folder, tracking_id):
         send_to_discord(discord_result, webhook_url=DISCORD_WEBHOOK_UNRECOGNIZED, tracking_id=tracking_id)
 
 def folder_inactive(person_dir, wait=INACTIVITY_WAIT):
-    """Return True if no file in the folder has been modified in the last 'wait' seconds."""
+    """Return True if folder is ready to process (or no recent file writes)."""
+    if os.path.isfile(os.path.join(person_dir, ".ready")):
+        return True
     now = time.time()
     for fname in os.listdir(person_dir):
         fpath = os.path.join(person_dir, fname)

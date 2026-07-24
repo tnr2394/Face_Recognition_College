@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 import time
 from pathlib import Path
 
@@ -107,6 +108,10 @@ def write_ready(folder):
         f.write("ready")
 
 
+def has_ready(folder):
+    return os.path.isfile(os.path.join(folder, READY_MARKER))
+
+
 def mark_processed(folder):
     with open(os.path.join(folder, PROCESSED_MARKER), "w", encoding="utf-8") as f:
         f.write("done")
@@ -124,6 +129,9 @@ def clear_processed(folder):
 
 
 def folder_inactive(folder, wait_sec=5):
+    """True when no file was modified recently. Ready batches skip the wait."""
+    if has_ready(folder):
+        return True
     now = time.time()
     for name in os.listdir(folder):
         path = os.path.join(folder, name)
@@ -190,6 +198,59 @@ def count_pending_batches(queue_dir):
 
 def ensure_dir(path):
     Path(path).mkdir(parents=True, exist_ok=True)
+
+
+def _rmtree_contents(path):
+    """Delete path if it exists (file or directory). Returns True if removed."""
+    if not path or not os.path.exists(path):
+        return False
+    try:
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            os.remove(path)
+        return True
+    except OSError:
+        return False
+
+
+def clear_pipeline_workdir(config=None):
+    """
+    Wipe ephemeral pipeline folders so ByteTrack IDs restarting at 1
+    do not collide with old recognition_folder/person_N (.processed) dirs.
+    """
+    if config is None:
+        config = load_config()
+    person_cfg = config.get("person") or {}
+    ofiq_cfg = config.get("ofiq") or {}
+    ranker_cfg = config.get("face_ranker") or {}
+    roi_cfg = config.get("roi") or {}
+
+    targets = [
+        person_cfg.get("queue_dir", "person_queue"),
+        ofiq_cfg.get("recognition_dir", "recognition_folder"),
+        ofiq_cfg.get("low_ofiq_dir", "low_ofiq_faces"),
+        ranker_cfg.get("output_dir", "ranked_faces"),
+        ranker_cfg.get("rejected_dir", "rejected_faces"),
+        roi_cfg.get("outside_roi_dir", "outside_roi_faces"),
+    ]
+    # Deduplicate while preserving order
+    seen = set()
+    removed = []
+    for path in targets:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        if _rmtree_contents(path):
+            removed.append(path)
+            ensure_dir(path)
+
+    # Recognition employee cooldown is fine to keep; track IDs are not used there.
+    if removed:
+        print(f"Cleared pipeline folders for fresh track IDs: {', '.join(removed)}")
+    else:
+        print("Pipeline folders already empty (nothing to clear)")
+    return removed
 
 
 def roi_config_path(config):

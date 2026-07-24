@@ -35,3 +35,9 @@ models/
 # IDE
 .vscode/
 .idea/
+
+*.js
+*.ps1
+*.log
+*.bat
+*.cmd

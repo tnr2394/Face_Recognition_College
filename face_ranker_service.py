@@ -244,13 +244,37 @@ class FaceRankerService:
             "normal": 0, "lenient": 0, "fallback": 0,
         }
 
-        for sample in samples:
+        # Batch YOLO on person crops (one GPU call for the whole batch)
+        crop_indices = []
+        crop_images = []
+        for i, sample in enumerate(samples):
+            if sample["meta"].get("receding"):
+                continue
+            crop = sample.get("person_crop")
+            if crop is not None and getattr(crop, "size", 0) > 0:
+                crop_indices.append(i)
+                crop_images.append(crop)
+
+        batch_dets = {}
+        if crop_images:
+            results = self.face_engine.predict_batch(crop_images)
+            for idx, det in zip(crop_indices, results):
+                batch_dets[idx] = det
+
+        lenient_cfg = self.config.get("face", {}).get("lenient", {})
+        lenient_conf = lenient_cfg.get("conf", 0.25)
+        need_lenient = []
+
+        for i, sample in enumerate(samples):
             if sample["meta"].get("receding"):
                 stats["receding"] += 1
                 continue
 
             face, reject = self.face_engine.find_face_in_sample(
-                sample["full_frame"], sample["meta"], sample["person_crop"]
+                sample["full_frame"],
+                sample["meta"],
+                sample["person_crop"],
+                detections=batch_dets.get(i),
             )
             if reject == "receding":
                 stats["receding"] += 1
@@ -262,8 +286,36 @@ class FaceRankerService:
                 )
                 continue
             if reject == "no_face":
+                need_lenient.append(i)
+                continue
+
+            stats["normal"] += 1
+            self._add_face_candidate(
+                candidates, rejected, stats, sample, face, tier=3, source="normal"
+            )
+
+        # Second pass: lenient conf, batched when possible
+        lenient_dets = {}
+        if need_lenient:
+            lenient_images = []
+            lenient_map = []
+            for i in need_lenient:
+                crop = samples[i].get("person_crop")
+                if crop is not None and getattr(crop, "size", 0) > 0:
+                    lenient_map.append(i)
+                    lenient_images.append(crop)
+            if lenient_images:
+                results = self.face_engine.predict_batch(lenient_images, conf=lenient_conf)
+                for idx, det in zip(lenient_map, results):
+                    lenient_dets[idx] = det
+
+            for i in need_lenient:
+                sample = samples[i]
                 face, reject = self.face_engine.find_face_lenient(
-                    sample["full_frame"], sample["meta"], sample["person_crop"]
+                    sample["full_frame"],
+                    sample["meta"],
+                    sample["person_crop"],
+                    detections=lenient_dets.get(i),
                 )
                 if reject == "receding":
                     stats["receding"] += 1
@@ -281,12 +333,6 @@ class FaceRankerService:
                 self._add_face_candidate(
                     candidates, rejected, stats, sample, face, tier=2, source="lenient"
                 )
-                continue
-
-            stats["normal"] += 1
-            self._add_face_candidate(
-                candidates, rejected, stats, sample, face, tier=3, source="normal"
-            )
 
         if not candidates and self.always_export_person and samples and not self.recognition_minimal:
             fallback_samples = samples
@@ -334,16 +380,9 @@ class FaceRankerService:
         return vis
 
     def _resolve_face_crop(self, full_frame, meta, person_crop, cached_face_crop):
-        """Re-detect on raw full frame so exports never use preview bbox overlays."""
-        if full_frame is None:
+        """Reuse cached face crop; do not re-run YOLO on the full frame at export."""
+        if cached_face_crop is not None and getattr(cached_face_crop, "size", 0) > 0:
             return cached_face_crop
-        for finder in (
-            self.face_engine.find_face_in_sample,
-            self.face_engine.find_face_lenient,
-        ):
-            face, reject = finder(full_frame, meta, person_crop)
-            if face is not None:
-                return face["face_crop"]
         return cached_face_crop
 
     @staticmethod

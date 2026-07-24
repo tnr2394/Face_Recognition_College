@@ -9,7 +9,7 @@ from pipeline_io import bbox_intersection_over_face, bbox_iou, clamp_bbox, point
 
 
 class FaceQualityEngine:
-    """Detect faces on full frame, filter by person bbox, score with landmark heuristics."""
+    """Detect faces on person crop (full frame only for export / fallback), score with landmarks."""
 
     def __init__(self, config, device=None, ofiq_scorer=None):
         self.config = config
@@ -54,6 +54,19 @@ class FaceQualityEngine:
             iou=self.iou,
             verbose=False,
         )[0]
+
+    def predict_batch(self, frames, conf=None):
+        """Run face YOLO on a list of images in one call. Empty list -> []."""
+        if not frames:
+            return []
+        results = self.model.predict(
+            frames,
+            conf=conf if conf is not None else self.conf,
+            device=self.device,
+            iou=self.iou,
+            verbose=False,
+        )
+        return list(results)
 
     @staticmethod
     def _landmark_xy(landmarks):
@@ -530,12 +543,22 @@ class FaceQualityEngine:
     def _face_associated_with_person(self, face_box, person_bbox, frame_w, frame_h, expand_ratio):
         if person_bbox is None:
             return True
-        if bbox_intersection_over_face(face_box, person_bbox) >= self.min_face_person_overlap:
-            return True
+        if bbox_intersection_over_face(face_box, person_bbox) < self.min_face_person_overlap:
+            return False
         cx = (face_box[0] + face_box[2]) / 2
         cy = (face_box[1] + face_box[3]) / 2
-        expanded = self.expand_bbox(person_bbox, frame_w, frame_h, expand_ratio)
-        return point_inside_bbox(cx, cy, expanded)
+        # Prefer faces whose center lies inside the person box (not a neighbor)
+        if not point_inside_bbox(cx, cy, person_bbox):
+            expanded = self.expand_bbox(person_bbox, frame_w, frame_h, expand_ratio)
+            if not point_inside_bbox(cx, cy, expanded):
+                return False
+        # Overhead / walkway: face should be in the upper portion of the person box
+        py1, py2 = person_bbox[1], person_bbox[3]
+        ph = max(1, py2 - py1)
+        head_limit = py1 + ph * max(0.35, min(0.85, self.max_face_center_y_ratio + 0.15))
+        if cy > head_limit:
+            return False
+        return True
 
     @staticmethod
     def _offset_face_box(face_box, dx, dy):
@@ -637,6 +660,7 @@ class FaceQualityEngine:
         box_offset=(0, 0),
         assoc_frame_w=None,
         assoc_frame_h=None,
+        export_frame=None,
     ):
         min_h = min_face_height if min_face_height is not None else self.min_face_height
         reject_half = (
@@ -669,11 +693,33 @@ class FaceQualityEngine:
             face_img_raw = image[y1:y2, x1:x2].copy()
             landmarks = self._extract_landmarks(detections, i)
             local_landmarks = self._landmarks_in_crop(landmarks, x1, y1)
-            # Tight crop: score + align for gates/OFIQ. Export = wider cut from original frame only.
+            # Tight crop: score + align for gates/OFIQ.
             face_aligned = self._prepare_face_crop(face_img_raw, landmarks, x1, y1)
-            face_export = self.crop_face_export_from_frame(
-                image, x1, y1, x2, y2, frame_w, frame_h, landmarks
-            )
+            # Export from full frame when available (real pixels beyond person crop).
+            if export_frame is not None:
+                fx1, fy1, fx2, fy2 = full_box
+                export_landmarks = None
+                if landmarks is not None:
+                    export_landmarks = [
+                        landmarks[0] + ox,
+                        landmarks[1] + oy,
+                        landmarks[2] + ox,
+                        landmarks[3] + oy,
+                    ]
+                face_export = self.crop_face_export_from_frame(
+                    export_frame,
+                    fx1,
+                    fy1,
+                    fx2,
+                    fy2,
+                    assoc_frame_w,
+                    assoc_frame_h,
+                    export_landmarks,
+                )
+            else:
+                face_export = self.crop_face_export_from_frame(
+                    image, x1, y1, x2, y2, frame_w, frame_h, landmarks
+                )
             half_face = bool(
                 reject_half
                 and self.is_half_face(face_img_raw, (x1, y1, x2, y2), frame_w, frame_h)
@@ -714,27 +760,21 @@ class FaceQualityEngine:
         min_face_height=None,
         bbox_expand_ratio=None,
         reject_half_face=None,
+        detections=None,
     ):
+        """Detect face on person crop only; full frame used for export pixels / fallback."""
         h, w = full_frame.shape[:2]
         bbox = clamp_bbox(
             person_meta["x1"], person_meta["y1"], person_meta["x2"], person_meta["y2"], w, h
         )
         expand = bbox_expand_ratio if bbox_expand_ratio is not None else self.bbox_expand_ratio
-        detections = self.predict(full_frame, conf=conf)
-        candidates = self._collect_face_candidates(
-            full_frame,
-            detections,
-            w,
-            h,
-            person_bbox=bbox,
-            expand_ratio=expand,
-            min_face_height=min_face_height,
-            reject_half_face=reject_half_face,
-        )
-        if person_crop is not None and person_crop.size > 0:
+        candidates = []
+
+        use_crop = person_crop is not None and getattr(person_crop, "size", 0) > 0
+        if use_crop:
             ph, pw = person_crop.shape[:2]
-            crop_det = self.predict(person_crop, conf=conf)
-            crop_candidates = self._collect_face_candidates(
+            crop_det = detections if detections is not None else self.predict(person_crop, conf=conf)
+            candidates = self._collect_face_candidates(
                 person_crop,
                 crop_det,
                 pw,
@@ -746,8 +786,21 @@ class FaceQualityEngine:
                 box_offset=(bbox[0], bbox[1]),
                 assoc_frame_w=w,
                 assoc_frame_h=h,
+                export_frame=full_frame,
             )
-            candidates.extend(crop_candidates)
+        else:
+            # Defensive: old batches without person crop
+            full_det = detections if detections is not None else self.predict(full_frame, conf=conf)
+            candidates = self._collect_face_candidates(
+                full_frame,
+                full_det,
+                w,
+                h,
+                person_bbox=bbox,
+                expand_ratio=expand,
+                min_face_height=min_face_height,
+                reject_half_face=reject_half_face,
+            )
 
         candidates = self._dedupe_face_candidates(candidates)
         return self._pick_best_face_candidate(candidates, bbox)
@@ -784,14 +837,16 @@ class FaceQualityEngine:
         )
         return self._pick_best_face_candidate(candidates, (0, 0, pw, ph))
 
-    def find_face_in_sample(self, full_frame, person_meta, person_crop=None):
+    def find_face_in_sample(self, full_frame, person_meta, person_crop=None, *, detections=None):
         """
         Find best face for a buffered sample.
         Returns (face_dict, hard_reject) where hard_reject is only 'no_face'.
         """
         if self.is_receding_sample(person_meta):
             return None, "receding"
-        face = self._find_face(full_frame, person_meta, person_crop)
+        face = self._find_face(
+            full_frame, person_meta, person_crop, detections=detections
+        )
         if face is None:
             return None, "no_face"
         back_reason = self.back_facing_reason(face, person_meta)
@@ -804,7 +859,7 @@ class FaceQualityEngine:
             face["gate_reject"] = self.passes_gates(face["metrics"])
         return face, None
 
-    def find_face_lenient(self, full_frame, person_meta, person_crop=None):
+    def find_face_lenient(self, full_frame, person_meta, person_crop=None, *, detections=None):
         """Low-threshold face search when normal detection finds nothing."""
         if self.is_receding_sample(person_meta):
             return None, "receding"
@@ -818,6 +873,7 @@ class FaceQualityEngine:
             min_face_height=lenient.get("min_face_height_px", 20),
             bbox_expand_ratio=lenient.get("bbox_expand_ratio", 0.25),
             reject_half_face=lenient_reject_half,
+            detections=detections,
         )
         if face is None:
             return None, "no_face"

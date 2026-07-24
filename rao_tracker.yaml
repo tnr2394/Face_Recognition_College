@@ -2,19 +2,18 @@
 # Goal: one stable ID per person — survive box resize (walk toward camera) and brief occlusion
 #
 # IMPORTANT: match_thresh is a max cost (cost = 1 - IoU), NOT an IoU minimum.
-#   match_thresh UP   → allow smaller overlap between frames (person getting larger in frame)
-#   match_thresh DOWN → stricter matching → IDs break every frame when box size changes
+#   match_thresh UP   → allow smaller overlap (helps size change; risks ID swaps in crowds)
+#   match_thresh DOWN → stricter matching (fewer swaps when people cross)
 #
 # Other knobs:
 #   new_track_thresh  UP slightly → harder to spawn a spurious new ID (keep <= PERSON_CONF)
-#   track_buffer      UP → keep lost track longer before ID is freed (~fps × seconds)
-#   track_high_thresh split between high/low confidence association passes
-#   track_low_thresh  second-pass recovery for weak detections
+#   track_buffer      how long to keep a lost track before freeing the ID
 
 tracker_type: bytetrack
 track_high_thresh: 0.25
 track_low_thresh: 0.1
 new_track_thresh: 0.4
-match_thresh: 0.85
-track_buffer: 150
+# Stricter than 0.88 — crowded walkways swap IDs when this is too high
+match_thresh: 0.80
+track_buffer: 90
 fuse_score: True
