@@ -114,7 +114,11 @@ def gstreamer_pipeline_opens(pipeline):
 
 
 def open_rtsp_capture(rtsp_url):
-    os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|stimeout;5000000")
+    # TCP + socket read timeout — helps detect dead sessions (still needs app-level watchdog)
+    os.environ.setdefault(
+        "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+        "rtsp_transport;tcp|stimeout;5000000|max_delay;500000",
+    )
     cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     try:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -145,30 +149,92 @@ def is_valid_video_source(source):
 
 
 class LatestFrameGrabber:
-    """Background RTSP reader that always keeps the newest frame."""
+    """
+    Background RTSP reader that keeps the newest frame.
 
-    def __init__(self, cap):
+    OpenCV/FFmpeg RTSP clients often stall after hours (half-open socket) while
+    MediaMTX still serves new clients (VLC). We track freshness and consecutive
+    failures so the capture loop can force-reconnect for 24/7 operation.
+    """
+
+    def __init__(self, cap, fail_limit=60):
         self._cap = cap
         self._lock = threading.Lock()
         self._frame = None
+        self._frame_seq = 0
+        self._last_ok_time = 0.0
+        self._fail_streak = 0
+        self._fail_limit = max(10, int(fail_limit))
+        self._dead = False
+        self._dead_reason = ""
         self._stopped = False
-        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="rtsp-grabber")
         self._thread.start()
+
+    def _mark_dead(self, reason):
+        with self._lock:
+            self._dead = True
+            self._dead_reason = reason
 
     def _loop(self):
         while not self._stopped:
-            ret, img = self._cap.read()
-            if not ret or img is None:
-                time.sleep(0.01)
+            if self._dead:
+                time.sleep(0.05)
                 continue
+            try:
+                if self._cap is None or not self._cap.isOpened():
+                    self._mark_dead("capture closed")
+                    continue
+                ret, img = self._cap.read()
+            except Exception as e:
+                self._fail_streak += 1
+                if self._fail_streak >= self._fail_limit:
+                    self._mark_dead(f"read exception: {e}")
+                time.sleep(0.05)
+                continue
+
+            if not ret or img is None:
+                self._fail_streak += 1
+                if self._fail_streak >= self._fail_limit:
+                    self._mark_dead(f"no frames ({self._fail_streak} failures)")
+                time.sleep(0.02)
+                continue
+
             with self._lock:
                 self._frame = img
+                self._frame_seq += 1
+                self._last_ok_time = time.time()
+                self._fail_streak = 0
 
-    def read(self):
+    def read_fresh(self, last_seq=-1):
+        """
+        Return (frame_copy, seq, age_sec) only when a newer frame arrived.
+        If stream is dead, raises ConnectionError.
+        """
         with self._lock:
-            if self._frame is None:
-                return None
-            return self._frame.copy()
+            if self._dead:
+                raise ConnectionError(
+                    f"RTSP grabber stalled: {self._dead_reason or 'unknown'}"
+                )
+            if self._frame is None or self._frame_seq == last_seq:
+                age = (
+                    (time.time() - self._last_ok_time)
+                    if self._last_ok_time > 0
+                    else float("inf")
+                )
+                return None, last_seq, age
+            age = time.time() - self._last_ok_time
+            return self._frame.copy(), self._frame_seq, age
+
+    def age_sec(self):
+        with self._lock:
+            if self._last_ok_time <= 0:
+                return float("inf")
+            return time.time() - self._last_ok_time
+
+    def is_dead(self):
+        with self._lock:
+            return self._dead
 
     def stop(self):
         self._stopped = True
@@ -195,6 +261,8 @@ class PersonCaptureService:
         self.jpeg_params = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
         self.vid_stride = p["vid_stride"]
         self.rtsp_reconnect_delay = p["rtsp_reconnect_delay"]
+        # Force reconnect if no *new* RTSP frame for this many seconds (OpenCV stall)
+        self.rtsp_stall_timeout = float(p.get("rtsp_stall_timeout_sec", 12))
         self.tracker_config = p["tracker"]
         self.person_conf = p["conf"]
         self.max_bbox_y1_ratio = p.get("max_bbox_y1_ratio", 0.72)
@@ -776,27 +844,49 @@ class PersonCaptureService:
     def _run_latest_frame_loop(self, rtsp_url, rotation=0, show=True):
         """
         Always process the newest RTSP frame. If inference/disk lags, old frames
-        are dropped so the live view never freezes on a backlog (missed persons).
+        are dropped. If the OpenCV client stalls (common after hours with MediaMTX),
+        raise so the outer loop force-reconnects — VLC working does not mean our
+        existing TCP session is healthy.
         """
         cap = open_rtsp_capture(rtsp_url)
         if not cap.isOpened():
             raise RuntimeError(f"Could not open RTSP: {rtsp_url}")
         grabber = LatestFrameGrabber(cap)
         frame_num = 0
-        print(f"RTSP latest-frame grabber on (rotation={rotation})")
+        last_seq = -1
+        last_progress = time.time()
+        print(
+            f"RTSP latest-frame grabber on (rotation={rotation}, "
+            f"stall_timeout={self.rtsp_stall_timeout}s)"
+        )
         try:
             while True:
-                raw = grabber.read()
+                try:
+                    raw, seq, age = grabber.read_fresh(last_seq)
+                except ConnectionError as e:
+                    raise ConnectionError(str(e)) from e
+
                 if raw is None:
-                    if not cap.isOpened():
+                    # No newer frame yet — do not reprocess a stale frame
+                    if age >= self.rtsp_stall_timeout:
+                        raise ConnectionError(
+                            f"RTSP stall: no new frame for {age:.1f}s "
+                            f"(MediaMTX may still work for new clients)"
+                        )
+                    if grabber.is_dead() or not cap.isOpened():
                         raise ConnectionError("RTSP capture closed")
-                    time.sleep(0.005)
+                    time.sleep(0.01)
                     continue
+
+                last_seq = seq
+                last_progress = time.time()
                 frame = apply_frame_rotation(raw, rotation) if rotation else raw
                 results_list = self.person_model.track(
                     frame, **self._tracker_kwargs(show=False, stream=False)
                 )
                 if not results_list:
+                    if time.time() - last_progress >= self.rtsp_stall_timeout:
+                        raise ConnectionError("RTSP stall during tracking")
                     continue
                 result = results_list[0]
                 result.orig_img = frame
@@ -809,7 +899,10 @@ class PersonCaptureService:
                         raise KeyboardInterrupt
         finally:
             grabber.stop()
-            cap.release()
+            try:
+                cap.release()
+            except Exception:
+                pass
 
     def _run_rotated_capture_loop(self, rtsp_url, rotation, show=True):
         self._run_latest_frame_loop(rtsp_url, rotation=rotation, show=show)
