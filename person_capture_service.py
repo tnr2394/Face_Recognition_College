@@ -157,11 +157,12 @@ class LatestFrameGrabber:
     failures so the capture loop can force-reconnect for 24/7 operation.
     """
 
-    def __init__(self, cap, fail_limit=60):
+    def __init__(self, cap, fail_limit=90):
         self._cap = cap
         self._lock = threading.Lock()
         self._frame = None
         self._frame_seq = 0
+        self._started_at = time.time()
         self._last_ok_time = 0.0
         self._fail_streak = 0
         self._fail_limit = max(10, int(fail_limit))
@@ -206,9 +207,17 @@ class LatestFrameGrabber:
                 self._last_ok_time = time.time()
                 self._fail_streak = 0
 
+    def seconds_waiting(self):
+        """Seconds since last good frame, or since grabber start if none yet."""
+        with self._lock:
+            if self._last_ok_time > 0:
+                return time.time() - self._last_ok_time
+            return time.time() - self._started_at
+
     def read_fresh(self, last_seq=-1):
         """
-        Return (frame_copy, seq, age_sec) only when a newer frame arrived.
+        Return (frame_copy, seq, wait_sec) when a newer frame arrived.
+        wait_sec is time since last good frame (or since connect if none yet).
         If stream is dead, raises ConnectionError.
         """
         with self._lock:
@@ -216,21 +225,14 @@ class LatestFrameGrabber:
                 raise ConnectionError(
                     f"RTSP grabber stalled: {self._dead_reason or 'unknown'}"
                 )
+            wait_sec = (
+                (time.time() - self._last_ok_time)
+                if self._last_ok_time > 0
+                else (time.time() - self._started_at)
+            )
             if self._frame is None or self._frame_seq == last_seq:
-                age = (
-                    (time.time() - self._last_ok_time)
-                    if self._last_ok_time > 0
-                    else float("inf")
-                )
-                return None, last_seq, age
-            age = time.time() - self._last_ok_time
-            return self._frame.copy(), self._frame_seq, age
-
-    def age_sec(self):
-        with self._lock:
-            if self._last_ok_time <= 0:
-                return float("inf")
-            return time.time() - self._last_ok_time
+                return None, last_seq, wait_sec
+            return self._frame.copy(), self._frame_seq, wait_sec
 
     def is_dead(self):
         with self._lock:
@@ -862,15 +864,15 @@ class PersonCaptureService:
         try:
             while True:
                 try:
-                    raw, seq, age = grabber.read_fresh(last_seq)
+                    raw, seq, wait_sec = grabber.read_fresh(last_seq)
                 except ConnectionError as e:
                     raise ConnectionError(str(e)) from e
 
                 if raw is None:
-                    # No newer frame yet — do not reprocess a stale frame
-                    if age >= self.rtsp_stall_timeout:
+                    # No newer frame yet — wait from connect (or last frame), never use inf
+                    if wait_sec >= self.rtsp_stall_timeout:
                         raise ConnectionError(
-                            f"RTSP stall: no new frame for {age:.1f}s "
+                            f"RTSP stall: no new frame for {wait_sec:.1f}s "
                             f"(MediaMTX may still work for new clients)"
                         )
                     if grabber.is_dead() or not cap.isOpened():
