@@ -36,8 +36,14 @@ models/
 .vscode/
 .idea/
 
-*.js
 *.ps1
 *.log
 *.bat
 *.cmd
+
+# Keep PM2 / setup scripts
+!ecosystem.config.js
+!scripts/
+!scripts/**
+!SETUP_UBUNTU.md
+!install_ubuntu.sh

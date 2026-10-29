@@ -54,6 +54,8 @@ person:
   writer_queue_size: 48
   vid_stride: 1
   rtsp_reconnect_delay: 5
+  # OpenCV RTSP can stall for hours while MediaMTX still works in VLC — force reopen
+  rtsp_stall_timeout_sec: 30
   max_bbox_y1_ratio: 0.72
   receding_peak_area_ratio: 0.88
   receding_shrink_ratio: 0.97
