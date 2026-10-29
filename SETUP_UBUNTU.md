@@ -41,10 +41,10 @@ chmod +x install_ubuntu.sh
 What the script does:
 
 1. Installs system packages (Python, Node, PM2, FFmpeg, PostgreSQL, **pgvector**)
-2. Creates Python venv + installs **GPU** PyTorch, **onnxruntime-gpu**, TensorFlow CUDA, Ultralytics, Flask, etc.
-3. Creates Postgres user/databases (`employees`, `vectors`) and enables `vector` extension
-4. Writes a sample `ecosystem` env hint file
-5. Prints GPU verification commands
+2. Detects existing **nvidia-smi** and **global torch+CUDA** — if torch already works on the system Python, it **does not reinstall torch** and creates the venv with `--system-site-packages` so that GPU torch is reused
+3. Installs the rest into the venv: **onnxruntime-gpu**, TensorFlow, Ultralytics, Flask, etc.
+4. Creates Postgres databases (`employees`, `vectors`) + `vector` extension
+5. Writes `.env.pm2.example`
 
 Then copy models, set `CAPTURE_SOURCE`, and start PM2 (see below).
 

@@ -44,24 +44,50 @@ if ! command -v pm2 >/dev/null 2>&1; then
   sudo npm install -g pm2
 fi
 
-echo "==> [2/6] NVIDIA check"
+echo "==> [2/6] NVIDIA / global torch check"
 if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi || true
+  echo "nvidia-smi OK"
+  nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
 else
-  echo "WARNING: nvidia-smi not found. Install NVIDIA drivers before expecting GPU."
+  echo "WARNING: nvidia-smi not found."
 fi
 
-echo "==> [3/6] Python venv + GPU packages"
-python3 -m venv "${VENV}"
+GLOBAL_TORCH_OK=0
+if python3 - <<'PY' >/dev/null 2>&1
+import torch
+assert torch.cuda.is_available()
+print(torch.__version__, torch.cuda.get_device_name(0))
+PY
+then
+  GLOBAL_TORCH_OK=1
+  echo "Global python3 torch+CUDA already available — will reuse it (no torch reinstall)."
+  python3 - <<'PY'
+import torch
+print("  torch", torch.__version__, "| CUDA", torch.version.cuda, "|", torch.cuda.get_device_name(0))
+PY
+else
+  echo "Global torch+CUDA not found — will install torch into the project venv."
+fi
+
+echo "==> [3/6] Python venv + remaining packages"
+# --system-site-packages lets the venv see globally installed torch when present
+if [[ "${GLOBAL_TORCH_OK}" == "1" ]]; then
+  python3 -m venv --system-site-packages "${VENV}"
+else
+  python3 -m venv "${VENV}"
+fi
 # shellcheck disable=SC1091
 source "${VENV}/bin/activate"
 pip install -U pip wheel setuptools
 
-# PyTorch CUDA 12.4 wheels (change if your CUDA differs — see https://pytorch.org)
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+if [[ "${GLOBAL_TORCH_OK}" != "1" ]]; then
+  # Only when machine has no usable global torch
+  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+fi
 
 pip uninstall -y onnxruntime 2>/dev/null || true
 pip install onnxruntime-gpu
+# FaceNet needs TF; prefer CUDA build when available
 pip install "tensorflow[and-cuda]" || pip install tensorflow
 
 pip install \
