@@ -14,7 +14,11 @@
  *   PIPELINE_VIDEO_SOURCE=cam1
  *   FACE_SERVER_URL=http://localhost:4445
  *   CAPTURE_SOURCE=rtsp://localhost:8554/live/cam1:270
- *   FACE_SERVER_DIR=C:\Users\raoit\Work\face-rec-college-py\face_identity_ui
+ *   FACE_SERVER_DIR=/var/www/html/face-rec-college-py/face_identity_ui
+ *
+ * Ubuntu layout:
+ *   /var/www/html/Face_Recognition_College/
+ *   /var/www/html/face-rec-college-py/face_identity_ui/
  *
  * Add more apps under module.exports.apps anytime.
  */
@@ -27,6 +31,8 @@ const ROOT_DIR = __dirname;
 const LOG_DIR = path.join(ROOT_DIR, 'logs', 'pm2');
 const RUN_PYTHON_CMD = path.join(ROOT_DIR, 'scripts', 'run_python.cmd');
 
+// Sibling of this repo: .../face-rec-college-py/face_identity_ui
+// On Ubuntu production that is usually /var/www/html/...
 const FACE_SERVER_DIR =
   process.env.FACE_SERVER_DIR ||
   path.join(path.dirname(ROOT_DIR), 'face-rec-college-py', 'face_identity_ui');

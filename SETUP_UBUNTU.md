@@ -1,6 +1,6 @@
 # Fresh Ubuntu + GPU setup (tracking + face server)
 
-Use this on a **blank Ubuntu machine with NVIDIA GPU**. No enrolled faces are required — the server creates empty tables; you enroll people later from the UI.
+Use this on a **blank Ubuntu machine with NVIDIA GPU**. Deploy under **`/var/www/html`**. No enrolled faces are required — the server creates empty tables; you enroll people later from the UI.
 
 ## Repositories
 
@@ -9,16 +9,20 @@ Use this on a **blank Ubuntu machine with NVIDIA GPU**. No enrolled faces are re
 | Tracking / ranker / watcher | https://github.com/tnr2394/Face_Recognition_College | `feature/pipeline-v2` |
 | Face server + UI | https://github.com/RaoInfotech/face-recognition-with-training | `master` |
 
-Clone them **side by side**:
+Clone them **side by side** under `/var/www/html`:
 
 ```bash
-mkdir -p ~/Work && cd ~/Work
+sudo mkdir -p /var/www/html
+sudo chown -R "$USER":"$USER" /var/www/html
+cd /var/www/html
+
 git clone -b feature/pipeline-v2 https://github.com/tnr2394/Face_Recognition_College.git
 mkdir -p face-rec-college-py
 git clone -b master https://github.com/RaoInfotech/face-recognition-with-training.git face-rec-college-py/face_identity_ui
+
 # Expected layout:
-#   ~/Work/Face_Recognition_College/
-#   ~/Work/face-rec-college-py/face_identity_ui/
+#   /var/www/html/Face_Recognition_College/
+#   /var/www/html/face-rec-college-py/face_identity_ui/
 ```
 
 > Large model files are **not** in git. Copy from your working PC:
@@ -29,7 +33,7 @@ git clone -b master https://github.com/RaoInfotech/face-recognition-with-trainin
 ## One-command install
 
 ```bash
-cd ~/Work/Face_Recognition_College
+cd /var/www/html/Face_Recognition_College
 chmod +x install_ubuntu.sh
 ./install_ubuntu.sh
 ```
@@ -86,11 +90,11 @@ Tables (`employees`, `employee_images`, `recognition_events`, `face_embeddings`)
 ```bash
 export CAPTURE_SOURCE="rtsp://localhost:8554/live/cam1:270"   # :270 = rotate 270°
 export FACE_SERVER_URL="http://localhost:4445"
-export FACE_SERVER_DIR="$HOME/Work/face-rec-college-py/face_identity_ui"
+export FACE_SERVER_DIR="/var/www/html/face-rec-college-py/face_identity_ui"
 export PIPELINE_VIDEO_SOURCE="cam1"
-export FACE_REC_PYTHON="$HOME/Work/Face_Recognition_College/.venv/bin/python"
+export FACE_REC_PYTHON="/var/www/html/Face_Recognition_College/.venv/bin/python"
 
-cd ~/Work/Face_Recognition_College
+cd /var/www/html/Face_Recognition_College
 pm2 start ecosystem.config.js
 pm2 save
 pm2 startup
@@ -99,7 +103,7 @@ pm2 startup
 ## Verify GPU
 
 ```bash
-source ~/Work/Face_Recognition_College/.venv/bin/activate
+source /var/www/html/Face_Recognition_College/.venv/bin/activate
 python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
 python -c "import onnxruntime as ort; print(ort.get_available_providers())"
 python -c "import tensorflow as tf; print(tf.config.list_physical_devices('GPU'))"
@@ -119,7 +123,8 @@ Face server on Linux enables GPU by default (CPU on Windows unless `FACE_SERVER_
 
 | Symptom | Fix |
 |---------|-----|
-| `Interpreter python NOT AVAILABLE` | Set `FACE_REC_PYTHON` to the venv python absolute path |
+| Permission denied under `/var/www/html` | `sudo chown -R $USER:$USER /var/www/html` |
+| `Interpreter python NOT AVAILABLE` | Set `FACE_REC_PYTHON` to `/var/www/html/Face_Recognition_College/.venv/bin/python` |
 | OFIQ on CPU only | `pip uninstall onnxruntime` then `pip install onnxruntime-gpu` |
 | TF no GPU | Install `tensorflow[and-cuda]` matching your driver/CUDA |
 | RTSP stall / reconnect loops | Check MediaMTX; raise `rtsp_stall_timeout_sec` in `pipeline_config.yaml` |

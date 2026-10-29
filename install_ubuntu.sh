@@ -6,10 +6,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="${ROOT}/.venv"
-FACE_UI_DEFAULT="$(cd "${ROOT}/.." && pwd)/face-rec-college-py/face_identity_ui"
+# Default deploy root on Ubuntu production
+WWW_ROOT="/var/www/html"
+FACE_UI_DEFAULT="${WWW_ROOT}/face-rec-college-py/face_identity_ui"
+# If this repo is already under /var/www/html, prefer sibling path from ROOT
+if [[ "${ROOT}" == "${WWW_ROOT}"/* ]]; then
+  FACE_UI_DEFAULT="$(cd "${ROOT}/.." && pwd)/face-rec-college-py/face_identity_ui"
+fi
 
 echo "==> Face Recognition College — Ubuntu GPU install"
 echo "    Repo: ${ROOT}"
+echo "    Face UI (expected): ${FACE_UI_DEFAULT}"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "This script is for Ubuntu/Linux. On Windows use the existing PM2 setup."
