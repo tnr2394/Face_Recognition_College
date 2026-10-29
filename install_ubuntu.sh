@@ -44,7 +44,35 @@ if ! command -v pm2 >/dev/null 2>&1; then
   sudo npm install -g pm2
 fi
 
-echo "==> [2/6] NVIDIA / global torch check"
+# Return 0 if python3 can import a module (optionally run an extra assert snippet).
+py_has() {
+  local mod="$1"
+  local extra="${2:-}"
+  python3 - <<PY >/dev/null 2>&1
+import importlib
+importlib.import_module("${mod}")
+${extra}
+PY
+}
+
+# Install pip package only if import check fails.
+pip_need() {
+  local mod="$1"
+  shift
+  local extra=""
+  if [[ "${1:-}" == "--assert" ]]; then
+    extra="$2"
+    shift 2
+  fi
+  if py_has "${mod}" "${extra}"; then
+    echo "  skip ${mod} (already importable)"
+    return 0
+  fi
+  echo "  install $*"
+  pip install "$@"
+}
+
+echo "==> [2/6] NVIDIA + already-installed Python packages"
 if command -v nvidia-smi >/dev/null 2>&1; then
   echo "nvidia-smi OK"
   nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader || true
@@ -52,27 +80,35 @@ else
   echo "WARNING: nvidia-smi not found."
 fi
 
-GLOBAL_TORCH_OK=0
-if python3 - <<'PY' >/dev/null 2>&1
-import torch
-assert torch.cuda.is_available()
-print(torch.__version__, torch.cuda.get_device_name(0))
-PY
-then
-  GLOBAL_TORCH_OK=1
-  echo "Global python3 torch+CUDA already available — will reuse it (no torch reinstall)."
+REUSE_GLOBAL=0
+echo "Checking global python3 packages (will skip installs that already work):"
+if py_has torch "import torch; assert torch.cuda.is_available()"; then
+  REUSE_GLOBAL=1
   python3 - <<'PY'
 import torch
-print("  torch", torch.__version__, "| CUDA", torch.version.cuda, "|", torch.cuda.get_device_name(0))
+print("  OK torch+CUDA", torch.__version__, torch.cuda.get_device_name(0))
 PY
 else
-  echo "Global torch+CUDA not found — will install torch into the project venv."
+  echo "  missing usable torch+CUDA"
+fi
+if py_has ultralytics; then
+  REUSE_GLOBAL=1
+  echo "  OK ultralytics"
+else
+  echo "  missing ultralytics"
+fi
+if py_has tensorflow; then
+  REUSE_GLOBAL=1
+  echo "  OK tensorflow"
+else
+  echo "  missing tensorflow"
 fi
 
-echo "==> [3/6] Python venv + remaining packages"
-# --system-site-packages lets the venv see globally installed torch when present
-if [[ "${GLOBAL_TORCH_OK}" == "1" ]]; then
+echo "==> [3/6] Python venv + install only what is missing"
+# Reuse global site-packages whenever major deps already exist on the machine
+if [[ "${REUSE_GLOBAL}" == "1" ]]; then
   python3 -m venv --system-site-packages "${VENV}"
+  echo "venv created with --system-site-packages (reuses global torch/ultralytics/TF)"
 else
   python3 -m venv "${VENV}"
 fi
@@ -80,19 +116,45 @@ fi
 source "${VENV}/bin/activate"
 pip install -U pip wheel setuptools
 
-if [[ "${GLOBAL_TORCH_OK}" != "1" ]]; then
-  # Only when machine has no usable global torch
-  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+# Heavy / GPU stacks — skip if already importable (global or venv)
+pip_need torch --assert "import torch; assert torch.cuda.is_available()" \
+  torch torchvision --index-url https://download.pytorch.org/whl/cu124
+pip_need ultralytics ultralytics
+if py_has tensorflow; then
+  echo "  skip tensorflow (already importable)"
+else
+  echo "  install tensorflow (CUDA build preferred)"
+  pip install "tensorflow[and-cuda]" || pip install tensorflow
 fi
 
-pip uninstall -y onnxruntime 2>/dev/null || true
-pip install onnxruntime-gpu
-# FaceNet needs TF; prefer CUDA build when available
-pip install "tensorflow[and-cuda]" || pip install tensorflow
+# Prefer GPU ORT: if only CPU onnxruntime is present, replace with gpu build
+NEED_ORT_GPU=1
+if python3 - <<'PY' >/dev/null 2>&1
+import onnxruntime as ort
+assert "CUDAExecutionProvider" in ort.get_available_providers()
+PY
+then
+  NEED_ORT_GPU=0
+  echo "  skip onnxruntime-gpu (CUDAExecutionProvider already available)"
+fi
+if [[ "${NEED_ORT_GPU}" == "1" ]]; then
+  pip uninstall -y onnxruntime 2>/dev/null || true
+  echo "  install onnxruntime-gpu"
+  pip install onnxruntime-gpu
+fi
 
-pip install \
-  ultralytics opencv-python-headless numpy pyyaml requests \
-  flask flask-cors pillow mtcnn psycopg2-binary keras-facenet scikit-learn
+# Remaining app deps — install only if missing
+pip_need cv2 opencv-python-headless
+pip_need numpy numpy
+pip_need yaml pyyaml
+pip_need requests requests
+pip_need flask flask
+pip_need flask_cors flask-cors
+pip_need PIL pillow
+pip_need mtcnn mtcnn
+pip_need psycopg2 psycopg2-binary
+pip_need keras_facenet keras-facenet
+pip_need sklearn scikit-learn
 
 echo "==> [4/6] Verify GPU Python stacks"
 python - <<'PY'

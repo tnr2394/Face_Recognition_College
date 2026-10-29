@@ -41,8 +41,8 @@ chmod +x install_ubuntu.sh
 What the script does:
 
 1. Installs system packages (Python, Node, PM2, FFmpeg, PostgreSQL, **pgvector**)
-2. Detects existing **nvidia-smi** and **global torch+CUDA** — if torch already works on the system Python, it **does not reinstall torch** and creates the venv with `--system-site-packages` so that GPU torch is reused
-3. Installs the rest into the venv: **onnxruntime-gpu**, TensorFlow, Ultralytics, Flask, etc.
+2. Detects **nvidia-smi** and whatever is already on global `python3` (**torch**, **ultralytics**, **tensorflow**, etc.) — **skips** those and only installs missing packages
+3. Creates a venv with `--system-site-packages` when globals are reused; still installs missing pieces (e.g. **onnxruntime-gpu**, Flask, psycopg2, …)
 4. Creates Postgres databases (`employees`, `vectors`) + `vector` extension
 5. Writes `.env.pm2.example`
 
