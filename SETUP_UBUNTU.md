@@ -7,14 +7,15 @@ Use this on a **blank Ubuntu machine with NVIDIA GPU**. No enrolled faces are re
 | Role | GitHub | Branch |
 |------|--------|--------|
 | Tracking / ranker / watcher | https://github.com/tnr2394/Face_Recognition_College | `feature/pipeline-v2` |
-| Face server + UI | https://github.com/VM8198/face-recognition-with-training | `master` |
+| Face server + UI | https://github.com/RaoInfotech/face-recognition-with-training | `master` |
 
 Clone them **side by side**:
 
 ```bash
 mkdir -p ~/Work && cd ~/Work
-git clone -b feature/pipeline-v2 git@github.com:tnr2394/Face_Recognition_College.git
-git clone -b master git@github.com:VM8198/face-recognition-with-training.git face-rec-college-py/face_identity_ui
+git clone -b feature/pipeline-v2 https://github.com/tnr2394/Face_Recognition_College.git
+mkdir -p face-rec-college-py
+git clone -b master https://github.com/RaoInfotech/face-recognition-with-training.git face-rec-college-py/face_identity_ui
 # Expected layout:
 #   ~/Work/Face_Recognition_College/
 #   ~/Work/face-rec-college-py/face_identity_ui/
