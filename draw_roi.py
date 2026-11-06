@@ -130,7 +130,7 @@ def main():
     parser.add_argument(
         "video_source",
         nargs="?",
-        default=r"test_videos\Knowns.mp4",
+        default="rtsp://localhost:8554/live/cam1:270",
         help="RTSP URL, video file, or webcam index",
     )
     parser.add_argument("--roi-file", help="Override ROI JSON path from pipeline_config.yaml")

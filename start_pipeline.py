@@ -68,7 +68,7 @@ def main():
     parser.add_argument(
         "video_source",
         nargs="?",
-        default=r"C:\Users\raoit\Work\Face_Recognition_College_OFIQ_RANKER\test_videos\Knowns.mp4",
+        default="rtsp://localhost:8554/live/cam1:90",
         help="Video source for person capture (RTSP URL, file path, or webcam index)",
     )
     parser.add_argument("--no-show", action="store_true", help="Hide capture preview window")

@@ -1,26 +1,10 @@
 /**
- * PM2 ecosystem — face API server + OFIQ capture/rank/watch pipeline.
- * cwd for pipeline apps = this repo; face-server cwd = face_identity_ui.
+ * PM2 ecosystem — face API server + per-camera OFIQ capture/rank/watch.
  *
- * Windows:
- *   .\pm2_pipeline.ps1 start
- *   .\pm2_pipeline.ps1 status | logs | stop | restart | delete | save
+ * Cameras: cameras.json (edit RTSP/rotation in Settings UI — do not hardcode here).
+ * Isolated dirs: work/<camera_id>/... so IN and OUT do not wipe each other.
  *
- * Linux / Jetson:
  *   pm2 start ecosystem.config.js
- *
- * Optional env:
- *   FACE_REC_PYTHON=C:\Path\to\python.exe
- *   PIPELINE_VIDEO_SOURCE=cam1
- *   FACE_SERVER_URL=http://localhost:4445
- *   CAPTURE_SOURCE=rtsp://localhost:8554/live/cam1:270
- *   FACE_SERVER_DIR=/var/www/html/face-rec-college-py/face_identity_ui
- *
- * Ubuntu layout:
- *   /var/www/html/Face_Recognition_College/
- *   /var/www/html/face-rec-college-py/face_identity_ui/
- *
- * Add more apps under module.exports.apps anytime.
  */
 
 const fs = require('fs');
@@ -30,24 +14,66 @@ const { execSync } = require('child_process');
 const ROOT_DIR = __dirname;
 const LOG_DIR = path.join(ROOT_DIR, 'logs', 'pm2');
 const RUN_PYTHON_CMD = path.join(ROOT_DIR, 'scripts', 'run_python.cmd');
+const CAMERAS_JSON = path.join(ROOT_DIR, 'cameras.json');
 
-// Sibling of this repo: .../face-rec-college-py/face_identity_ui
-// On Ubuntu production that is usually /var/www/html/...
+function loadPm2EnvFile() {
+  const filePath = path.join(ROOT_DIR, '.env.pm2');
+  const out = {};
+  if (!fs.existsSync(filePath)) {
+    return out;
+  }
+  for (const raw of fs.readFileSync(filePath, 'utf8').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+    const m = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!m) {
+      continue;
+    }
+    let value = m[2].trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    out[m[1]] = value;
+  }
+  return out;
+}
+
+function loadCameras() {
+  if (!fs.existsSync(CAMERAS_JSON)) {
+    console.warn(`[ecosystem] Missing ${CAMERAS_JSON}`);
+    return [];
+  }
+  try {
+    const data = JSON.parse(fs.readFileSync(CAMERAS_JSON, 'utf8'));
+    return Array.isArray(data.cameras) ? data.cameras : [];
+  } catch (err) {
+    console.error(`[ecosystem] Failed to parse cameras.json: ${err.message}`);
+    return [];
+  }
+}
+
+const FILE_ENV = loadPm2EnvFile();
+
 const FACE_SERVER_DIR =
+  FILE_ENV.FACE_SERVER_DIR ||
   process.env.FACE_SERVER_DIR ||
   path.join(path.dirname(ROOT_DIR), 'face-rec-college-py', 'face_identity_ui');
 
 const FACE_SERVER_URL =
-  process.env.FACE_SERVER_URL || 'http://localhost:4445';
+  FILE_ENV.FACE_SERVER_URL ||
+  process.env.FACE_SERVER_URL ||
+  'http://localhost:4445';
 
-/** Video source for person_capture_service.py — override with CAPTURE_SOURCE env. */
-// Password special chars must be URL-encoded (@ -> %40, # -> %23, etc.)
-const CAPTURE_SOURCE =
-  process.env.CAPTURE_SOURCE ||
-  "C:\\Users\\raoit\\Work\\Face_Recognition_College_OFIQ_RANKER\\test_videos\\Knowns.mp4";
+if (process.env.FACE_REC_PYTHON == null && FILE_ENV.FACE_REC_PYTHON) {
+  process.env.FACE_REC_PYTHON = FILE_ENV.FACE_REC_PYTHON;
+}
 
 function quoteCmdArg(value) {
-  // Keep & ? = and spaces inside one argv for cmd.exe /c
   const s = String(value);
   return `"${s.replace(/"/g, '""')}"`;
 }
@@ -56,7 +82,6 @@ function resolvePythonInterpreter() {
   if (process.env.FACE_REC_PYTHON && fs.existsSync(process.env.FACE_REC_PYTHON)) {
     return process.env.FACE_REC_PYTHON;
   }
-
   const known = [];
   if (process.platform === 'win32') {
     const local = process.env.LOCALAPPDATA || '';
@@ -66,8 +91,6 @@ function resolvePythonInterpreter() {
       path.join(local, 'Programs', 'Python', 'Python311', 'python.exe'),
       path.join(local, 'Programs', 'Python', 'Python310', 'python.exe'),
       'C:\\Python312\\python.exe',
-      'C:\\Python311\\python.exe',
-      'C:\\Python310\\python.exe',
       path.join(home, 'anaconda3', 'python.exe'),
       path.join(home, 'miniconda3', 'python.exe')
     );
@@ -77,7 +100,6 @@ function resolvePythonInterpreter() {
       return p;
     }
   }
-
   const candidates =
     process.platform === 'win32'
       ? ['python', 'python3', 'py']
@@ -103,18 +125,15 @@ function resolvePythonInterpreter() {
 }
 
 const PYTHON = resolvePythonInterpreter();
-/** On Windows Store Python, use cmd wrapper so PM2 does not require existsSync(python.exe). */
 const USE_CMD_WRAPPER = process.platform === 'win32' && !PYTHON;
+const CAMERAS = loadCameras();
 
-if (USE_CMD_WRAPPER) {
-  console.log(
-    `[ecosystem] Using scripts\\run_python.cmd (Windows Store Python / PATH stub)`
-  );
-} else {
-  console.log(`[ecosystem] Using Python interpreter: ${PYTHON || 'python3'}`);
-}
+console.log(`[ecosystem] Using Python interpreter: ${PYTHON || 'python3'}`);
 console.log(`[ecosystem] Face server dir: ${FACE_SERVER_DIR}`);
 console.log(`[ecosystem] FACE_SERVER_URL: ${FACE_SERVER_URL}`);
+console.log(
+  `[ecosystem] Cameras: ${CAMERAS.map((c) => c.id).join(', ') || '(none)'}`
+);
 
 if (!fs.existsSync(LOG_DIR)) {
   fs.mkdirSync(LOG_DIR, { recursive: true });
@@ -143,8 +162,6 @@ function pythonApp(name, scriptFile, extra = {}) {
   };
 
   if (USE_CMD_WRAPPER) {
-    // Windows: PM2 must spawn cmd.exe (spawn EINVAL on .cmd directly).
-    // Quote every argv so RTSP `&` / `@` are not eaten by cmd.
     const absScript = path.isAbsolute(scriptFile)
       ? scriptFile
       : path.join(cwd, scriptFile);
@@ -172,34 +189,46 @@ function pythonApp(name, scriptFile, extra = {}) {
   };
 }
 
-module.exports = {
-  apps: [
-    // API + dashboard — start first; watcher calls this on localhost:4445
-    pythonApp('face-server', 'face_rec_server_enhanced.py', {
-      cwd: FACE_SERVER_DIR,
+function cameraWorkEnv(cameraId) {
+  const work = path.join(ROOT_DIR, 'work', cameraId);
+  return {
+    CAMERA_ID: cameraId,
+    PIPELINE_VIDEO_SOURCE: cameraId,
+    PERSON_QUEUE_DIR: path.join(work, 'person_queue'),
+    RECOGNITION_DIR: path.join(work, 'recognition_folder'),
+    LOW_OFIQ_DIR: path.join(work, 'low_ofiq_faces'),
+    REJECTED_DIR: path.join(work, 'rejected_faces'),
+    OUTSIDE_ROI_DIR: path.join(work, 'outside_roi_faces'),
+    RANKED_DIR: path.join(work, 'ranked_faces'),
+    ROI_FILE: path.join(work, 'roi.json'),
+    PIPELINE_RECOGNITION_MODE: '1',
+    FACE_SERVER_URL,
+  };
+}
+
+const apps = [
+  pythonApp('face-server', 'face_rec_server_enhanced.py', {
+    cwd: FACE_SERVER_DIR,
+    env: {
+      FACE_SERVER_FORCE_CPU: '1',
+      CUDA_VISIBLE_DEVICES: '-1',
+    },
+  }),
+];
+
+for (const cam of CAMERAS) {
+  const id = String(cam.id || '').trim();
+  if (!id) {
+    continue;
+  }
+  const env = cameraWorkEnv(id);
+  apps.push(
+    pythonApp(`face-ranker-${id}`, 'face_ranker_service.py', { env }),
+    pythonApp(`recognition-watcher-${id}`, 'recognition_watcher.py', {
+      env: { ...env, FACE_SERVER_URL },
     }),
-    // Stage 2: person_queue -> recognition_folder
-    pythonApp('face-ranker', 'face_ranker_service.py', {
-      env: {
-        PIPELINE_RECOGNITION_MODE: '1', // '0' = detect-only (ranked_faces)
-      },
-    }),
-    // Stage 3: recognition_folder -> API + Discord + /recognitions log
-    pythonApp('recognition-watcher', 'recognition_watcher.py', {
-      env: {
-        FACE_SERVER_URL,
-        PIPELINE_VIDEO_SOURCE:
-          process.env.PIPELINE_VIDEO_SOURCE || 'cam1',
-      },
-    }),
-    // Stage 1: RTSP / video -> person_queue
-    // Pass URL via CAPTURE_SOURCE env (cmd.exe eats '&' in argv, which drops subtype=0)
-    pythonApp('person-capture', 'person_capture_service.py', {
-      env: {
-        CAPTURE_SOURCE,
-        PIPELINE_VIDEO_SOURCE:
-          process.env.PIPELINE_VIDEO_SOURCE || 'cam1',
-      },
-    }),
-  ],
-};
+    pythonApp(`person-capture-${id}`, 'person_capture_service.py', { env })
+  );
+}
+
+module.exports = { apps };

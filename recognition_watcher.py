@@ -20,12 +20,12 @@ from pipeline_io import load_config
 FACE_SERVER_URL = "http://localhost:4445"
 TRAINING_MODE_CACHE_SECONDS = 30
 _training_mode_cache = {'value': None, 'checked_at': 0}
-DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1143427649243459584/NhuVUtPoNnMBlBlBXKTKFppZiFyBOTWYbzwxSXZb5MJm-NrSK30rW4DcV3Rwx19d6rRT"
-DISCORD_WEBHOOK_UNRECOGNIZED = DISCORD_WEBHOOK
+DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1110920867166302370/MBapOMSOejraN669FTuRsG8PZPOzCmAFODBIj0uTraU1oVFe2KL6Klt6AbjGJRVfLzQX"
+DISCORD_WEBHOOK_UNRECOGNIZED = "https://discord.com/api/webhooks/1344974595689676861/MtT4AGC9EeNii-URXjMW-iI8jjnTnEu-obBGHnlxr_CCen2IdbfTZKzUTLkd6KnSpngs"
 
 GOOGLE_SHEET_API_URL = "https://script.google.com/macros/s/AKfycbye9j6E3fmdZ_b636aYcDxyVHtH7_lNgYwJHRieec1XCdL9nZlqgAWmyC2ib92qjgSz3g/exec"
 
-RECOGNITION_FOLDER = "recognition_folder"
+RECOGNITION_FOLDER_DEFAULT = "recognition_folder"
 LOW_OFIQ_FOLDER = "low_ofiq_faces"
 MAX_API_IMAGE_DIM = 1024  # cap longest side for API payload; preserve aspect ratio
 INACTIVITY_WAIT = 5  # seconds to wait for folder inactivity
@@ -41,6 +41,10 @@ def get_face_server_url():
     if cfg_url:
         return cfg_url.rstrip("/")
     return FACE_SERVER_URL.rstrip("/")
+
+def get_recognition_folder():
+    """Per-camera recognition handoff dir (RECOGNITION_DIR env via pipeline_io)."""
+    return load_config().get("ofiq", {}).get("recognition_dir", RECOGNITION_FOLDER_DEFAULT)
 
 def get_video_source_name():
     """Camera label for dashboard logs (legacy VideoName field)."""
@@ -685,7 +689,7 @@ def process_person_folder(person_dir, person_folder, tracking_id):
         )
         relocate_to_low_ofiq(person_dir, person_folder)
         mark_processed(os.path.join(get_low_ofiq_folder(), person_folder))
-        ready_file = os.path.join(RECOGNITION_FOLDER, person_folder, ".ready")
+        ready_file = os.path.join(get_recognition_folder(), person_folder, ".ready")
         if os.path.isfile(ready_file):
             os.remove(ready_file)
         return
@@ -745,17 +749,18 @@ def folder_has_face_exports(person_dir):
 
 def get_pending_person_folders():
     """Return person folders ready for API recognition, oldest first."""
-    if not os.path.isdir(RECOGNITION_FOLDER):
+    recognition_folder = get_recognition_folder()
+    if not os.path.isdir(recognition_folder):
         return []
 
     watcher_cfg = load_config().get("watcher", {})
     require_ready = watcher_cfg.get("require_ready", False)
 
     pending = []
-    for person_folder in os.listdir(RECOGNITION_FOLDER):
+    for person_folder in os.listdir(recognition_folder):
         if not person_folder.startswith("person_"):
             continue
-        person_dir = os.path.join(RECOGNITION_FOLDER, person_folder)
+        person_dir = os.path.join(recognition_folder, person_folder)
         if not os.path.isdir(person_dir) or is_processed(person_dir):
             continue
 
@@ -786,7 +791,8 @@ def get_pending_person_folders():
     return pending
 
 def main():
-    os.makedirs(RECOGNITION_FOLDER, exist_ok=True)
+    recognition_folder = get_recognition_folder()
+    os.makedirs(recognition_folder, exist_ok=True)
     config = load_config()
     watcher_cfg = config.get("watcher", {})
     training_mode = is_training_mode_enabled()
@@ -800,7 +806,7 @@ def main():
         f"Watcher require_ready: {watcher_cfg.get('require_ready', False)} "
         f"(false = also process folders with face exports but no .ready)"
     )
-    print(f"Watching '{RECOGNITION_FOLDER}' for new person folders...")
+    print(f"Watching '{recognition_folder}' for new person folders...")
     while True:
         try:
             for _, person_folder, person_dir, ready_file in get_pending_person_folders():

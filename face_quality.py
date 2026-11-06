@@ -35,6 +35,9 @@ class FaceQualityEngine:
         self.max_face_center_y_ratio = ranker_cfg.get("max_face_center_y_ratio", 0.52)
         self.min_frontality_back = ranker_cfg.get("min_frontality_back", 40)
         self.min_eyes_back = ranker_cfg.get("min_eyes_back", 32)
+        # Profile/side-face geometry: eye spacing vs face width, L/R symmetry
+        self.min_eye_span_ratio = float(ranker_cfg.get("min_eye_span_ratio", 0.22))
+        self.min_face_symmetry = float(ranker_cfg.get("min_face_symmetry", 0.25))
         self.align_faces = ranker_cfg.get("align_faces", True)
         self.align_max_angle_deg = ranker_cfg.get("align_max_angle_deg", 30)
         self.camera_profile = config.get("camera_profile", "standard")
@@ -158,22 +161,33 @@ class FaceQualityEngine:
         except Exception:
             return 0.0
 
+    def _face_symmetry_score(self, img):
+        """0..1 left/right correlation (negatives clamped to 0) — profiles score low."""
+        try:
+            if img is None or getattr(img, "size", 0) == 0:
+                return 0.0
+            face = cv2.resize(img, (64, 64))
+            gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
+            left_half = gray[:, :32]
+            right_half = np.fliplr(gray[:, 32:])
+            symmetry = np.corrcoef(left_half.flatten(), right_half.flatten())[0, 1]
+            if np.isnan(symmetry):
+                return 0.0
+            return float(max(0.0, min(1.0, float(symmetry))))
+        except Exception:
+            return 0.0
+
     def calculate_frontality_score(self, img, landmarks):
         try:
             if img.size == 0:
                 return 0.0
+            symmetry = self._face_symmetry_score(img)
             coords = self._landmark_xy(landmarks)
             if coords is None:
-                face = cv2.resize(img, (64, 64))
-                gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
-                left_half = gray[:, :32]
-                right_half = np.fliplr(gray[:, 32:])
-                symmetry = np.corrcoef(left_half.flatten(), right_half.flatten())[0, 1]
-                if np.isnan(symmetry):
-                    symmetry = 0
                 h, w = img.shape[:2]
                 aspect_score = 1.0 - min(1.0, abs((w / h if h > 0 else 0) - 0.8) / 0.4)
-                return (symmetry * 0.7 + aspect_score * 0.3) * 100
+                # Map 0..1 symmetry to roughly -1..1 corr style weight used before
+                return float((symmetry * 0.7 + aspect_score * 0.3) * 100)
 
             left_eye = (coords[0], coords[1])
             right_eye = (coords[2], coords[3])
@@ -184,20 +198,20 @@ class FaceQualityEngine:
             eye_midpoint_x = (left_eye[0] + right_eye[0]) / 2
             center_alignment = max(0, 1.0 - abs(eye_midpoint_x - (w / 2)) / (w / 2))
             eye_distance = abs(right_eye[0] - left_eye[0])
-            distance_ratio = eye_distance / w
+            distance_ratio = eye_distance / max(1.0, float(w))
+            # Profiles: eyes nearly stacked / collapsed — hard-penalize tiny span
+            if distance_ratio < self.min_eye_span_ratio:
+                return float(min(25.0, distance_ratio / max(self.min_eye_span_ratio, 1e-6) * 25.0))
             ratio_target = 0.38 if self.camera_profile == "overhead" else 0.43
-            ratio_tolerance = 0.35 if self.camera_profile == "overhead" else 0.2
+            ratio_tolerance = 0.28 if self.camera_profile == "overhead" else 0.2
             distance_score = 1.0 - min(1.0, abs(distance_ratio - ratio_target) / ratio_tolerance)
-            return float(
-                min(
-                    100,
-                    max(
-                        0,
-                        (horizontal_alignment * 0.4 + center_alignment * 0.4 + distance_score * 0.2)
-                        * 100,
-                    ),
-                )
+            landmark_score = (
+                horizontal_alignment * 0.35
+                + center_alignment * 0.30
+                + distance_score * 0.20
+                + symmetry * 0.15
             )
+            return float(min(100, max(0, landmark_score * 100)))
         except Exception:
             return 50.0
 
@@ -388,10 +402,21 @@ class FaceQualityEngine:
         max_y = y1 + self.max_face_center_y_ratio * person_h
         return face_cy <= max_y
 
+    def _eye_span_ratio(self, face):
+        """Horizontal eye spacing / face width. Profiles collapse toward ~0."""
+        box = face.get("face_box")
+        if not box or len(box) < 4:
+            return None
+        fw = max(1.0, float(box[2] - box[0]))
+        coords = self._landmark_xy(face.get("landmarks"))
+        if coords is None:
+            return None
+        return abs(coords[2] - coords[0]) / fw
+
     def back_facing_reason(self, face, person_meta):
         """
-        Back/profile rejection — requires combined signals so distant front-facing
-        people (small face in a large person box) are not dropped.
+        Back/profile rejection. Side faces (ear-only / sharp profile) are dropped
+        via low frontality, collapsed eye span, or weak left/right symmetry.
         """
         if not self.check_back_facing:
             return None
@@ -399,16 +424,35 @@ class FaceQualityEngine:
         metrics = face.get("metrics") or {}
         frontality = self._scalar_metric(metrics.get("frontality", 0))
         eyes = self._scalar_metric(metrics.get("eyes", 0))
-        very_low_front = frontality < self.min_frontality_back * 0.7
         low_front = frontality < self.min_frontality_back
         low_eyes = eyes < self.min_eyes_back
         head_ok = bool(self.is_face_in_head_region(face["face_box"], person_meta))
 
-        if very_low_front:
+        # Strong profile signal: eye landmarks nearly stacked / too close
+        span = self._eye_span_ratio(face)
+        if span is not None and span < self.min_eye_span_ratio:
+            return "side_profile_eye_span"
+
+        # Low frontality alone is enough for side/back (was: also required low eyes)
+        if low_front:
             return "back_facing_low_frontality"
-        if low_front and low_eyes:
+
+        # Asymmetry only when face is not clearly frontal — many good matches
+        # have low L/R correlation under overhead lighting / partial crop.
+        crop = face.get("face_crop_tight")
+        if crop is None:
+            crop = face.get("face_crop")
+        if (
+            crop is not None
+            and getattr(crop, "size", 0) > 0
+            and frontality < self.min_frontality_back * 1.15
+            and self._face_symmetry_score(crop) < self.min_face_symmetry
+        ):
+            return "side_profile_asymmetry"
+
+        if low_eyes and frontality < self.min_frontality_back * 1.1:
             return "back_facing"
-        if low_front and not head_ok and self.camera_profile != "overhead":
+        if not head_ok and frontality < self.min_frontality_back * 1.1:
             return "back_facing_head_position"
         return None
 

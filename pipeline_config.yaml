@@ -4,25 +4,33 @@ camera_profile: overhead
 profiles:
   overhead:
     person:
-      receding_peak_area_ratio: 0.92
+      # Mark walking-away sooner (bbox under 94% of peak) and skip storing those frames
+      receding_peak_area_ratio: 0.94
+      receding_min_track_samples: 1
+      skip_store_when_receding: true
+      strip_receding_on_flush: true
     face:
       conf: 0.4
       min_face_height_px: 20
       gates:
-        blur: 25
-        completeness: 20
-        frontality: 20
-        eyes: 20
+        # Looser after live check: half_face was killing good overhead faces
+        blur: 20
+        completeness: 18
+        frontality: 35
+        eyes: 5
         mouth: 0
         combined: 25
     face_ranker:
       bbox_expand_ratio: 0.12
       face_crop_expand_ratio: 0.25
       face_crop_expand_min_px: 35
+      # false: overhead pitch often trips half_face on usable faces
       reject_half_face: false
       check_back_facing: true
-      min_frontality_back: 35
-      min_eyes_back: 28
+      min_frontality_back: 36
+      min_eyes_back: 10
+      min_eye_span_ratio: 0.14
+      min_face_symmetry: 0.08
       max_face_center_y_ratio: 0.65
       head_anchor_ratio: 0.08
 
@@ -62,6 +70,9 @@ person:
   receding_shrink_frames: 2
   receding_require_shrink_streak: false
   receding_min_track_samples: 2
+  # Walking away: do not write person samples (ranker also skips receding meta)
+  skip_store_when_receding: true
+  strip_receding_on_flush: true
 
 face:
   model: models/yolov8n-face-landmarks.pt
@@ -118,8 +129,11 @@ face_ranker:
   skip_receding_samples: true
   check_back_facing: true
   max_face_center_y_ratio: 0.52
-  min_frontality_back: 40
-  min_eyes_back: 32
+  min_frontality_back: 45
+  min_eyes_back: 28
+  # Reject sharp profiles: eyes too close in crop; asymmetry only if not clearly frontal
+  min_eye_span_ratio: 0.18
+  min_face_symmetry: 0.12
   export_only_passing_gates: true
   rejected_dir: rejected_faces
   align_faces: true
@@ -136,7 +150,7 @@ watcher:
   # face_server_url: "http://localhost:4445"
 
 roi:
-  enabled: false
+  enabled: true
   file: roi.json
   outside_roi_dir: outside_roi_faces
   face_mode: overlap

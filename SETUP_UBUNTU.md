@@ -88,7 +88,7 @@ Tables (`employees`, `employee_images`, `recognition_events`, `face_embeddings`)
 ## Configure RTSP + PM2
 
 ```bash
-export CAPTURE_SOURCE="rtsp://localhost:8554/live/cam1:270"   # :270 = rotate 270°
+export CAPTURE_SOURCE="rtsp://localhost:8554/live/cam1:90"   # :N = rotate N°
 export FACE_SERVER_URL="http://localhost:4445"
 export FACE_SERVER_DIR="/var/www/html/face-rec-college-py/face_identity_ui"
 export PIPELINE_VIDEO_SOURCE="cam1"

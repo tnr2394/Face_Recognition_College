@@ -36,6 +36,24 @@ def load_config(path=CONFIG_PATH):
             _deep_merge(config, overlay)
         else:
             print(f"Warning: camera_profile '{profile_name}' has no profiles.{profile_name} section")
+    # Per-camera isolated dirs (PM2 sets these so IN/OUT do not share queues)
+    _env_path_overrides = (
+        ("PERSON_QUEUE_DIR", ("person", "queue_dir")),
+        ("RECOGNITION_DIR", ("ofiq", "recognition_dir")),
+        ("LOW_OFIQ_DIR", ("ofiq", "low_ofiq_dir")),
+        ("REJECTED_DIR", ("face_ranker", "rejected_dir")),
+        ("OUTSIDE_ROI_DIR", ("roi", "outside_roi_dir")),
+        ("ROI_FILE", ("roi", "file")),
+        ("RANKED_DIR", ("face_ranker", "output_dir")),
+    )
+    for env_key, path_keys in _env_path_overrides:
+        value = os.environ.get(env_key, "").strip()
+        if not value:
+            continue
+        section, key = path_keys
+        if section not in config or not isinstance(config[section], dict):
+            config[section] = {}
+        config[section][key] = value
     return config
 
 

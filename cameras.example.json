@@ -1,0 +1,25 @@
+{
+  "office": {
+    "timezone": "Asia/Kolkata",
+    "shift_start": "09:30",
+    "shift_end": "18:30",
+    "debounce_sec": 45,
+    "min_break_sec": 60
+  },
+  "cameras": [
+    {
+      "id": "gate_in",
+      "role": "in",
+      "label": "Main Gate IN",
+      "rtsp": "rtsp://user:pass@CAMERA_IP/stream1",
+      "rotation": 270
+    },
+    {
+      "id": "gate_out",
+      "role": "out",
+      "label": "Main Gate OUT",
+      "rtsp": "rtsp://user:pass@CAMERA_IP/stream1",
+      "rotation": 270
+    }
+  ]
+}

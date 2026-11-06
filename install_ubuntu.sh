@@ -210,7 +210,7 @@ export FACE_REC_PYTHON="${VENV}/bin/python"
 export FACE_SERVER_DIR="${FACE_UI_DEFAULT}"
 export FACE_SERVER_URL="http://localhost:4445"
 export PIPELINE_VIDEO_SOURCE="cam1"
-export CAPTURE_SOURCE="rtsp://localhost:8554/live/cam1:270"
+export CAPTURE_SOURCE="rtsp://localhost:8554/live/cam1:90"
 EOF
 
 echo

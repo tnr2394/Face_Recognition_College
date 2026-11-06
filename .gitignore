@@ -7,6 +7,7 @@ outside_roi_faces/
 rejected_faces/
 live_results/
 results/
+work/
 recognition_cooldown.json
 recognition_counts.json
 
@@ -47,3 +48,10 @@ models/
 !scripts/**
 !SETUP_UBUNTU.md
 !install_ubuntu.sh
+# Local runtime / secrets
+.venv/
+venv/
+.env.pm2
+cameras.json
+logs/
+*.pt

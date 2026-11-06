@@ -273,6 +273,9 @@ class PersonCaptureService:
         self.receding_shrink_frames = p.get("receding_shrink_frames", 2)
         self.receding_require_shrink_streak = p.get("receding_require_shrink_streak", False)
         self.receding_min_track_samples = p.get("receding_min_track_samples", 2)
+        # Walking away: do not write samples (was: store + mark receding for ranker)
+        self.skip_store_when_receding = bool(p.get("skip_store_when_receding", True))
+        self.strip_receding_on_flush = bool(p.get("strip_receding_on_flush", True))
         self.clear_pipeline_on_start = bool(p.get("clear_pipeline_on_start", True))
         self.sample_stride = max(1, int(p.get("sample_stride", 2)))
         self.id_break_min_iou = float(p.get("id_break_min_iou", 0.12))
@@ -479,6 +482,16 @@ class PersonCaptureService:
                     if sample_count < 1 or not os.path.isdir(staging_dir):
                         shutil.rmtree(staging_dir, ignore_errors=True)
                         continue
+                    if self.strip_receding_on_flush:
+                        kept = self._strip_receding_samples(staging_dir)
+                        if kept < 1:
+                            shutil.rmtree(staging_dir, ignore_errors=True)
+                            print(
+                                f"Track {track_id} discarded all-receding buffer "
+                                f"gen={gen} ({sample_count} frames)"
+                            )
+                            continue
+                        sample_count = kept
                     ts = int(time.time())
                     output_name = f"person_{track_id}_b{batch}_{ts}"
                     output_dir = os.path.join(self.queue_dir, output_name)
@@ -510,6 +523,33 @@ class PersonCaptureService:
                 print(f"Flush worker error: {e}")
             finally:
                 self._flush_q.task_done()
+
+    @staticmethod
+    def _strip_receding_samples(staging_dir):
+        """Remove frames marked receding=true. Returns count of frames kept."""
+        if not os.path.isdir(staging_dir):
+            return 0
+        kept = 0
+        for name in os.listdir(staging_dir):
+            if not name.endswith("_meta.json"):
+                continue
+            meta_path = os.path.join(staging_dir, name)
+            prefix = name[: -len("_meta.json")]
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                meta = {}
+            if meta.get("receding"):
+                for suffix in ("_meta.json", "_full.jpg", "_person.jpg"):
+                    path = os.path.join(staging_dir, prefix + suffix)
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            else:
+                kept += 1
+        return kept
 
     def _is_receding(self, track_id, box_area, peak_area):
         """True when person bbox is well below this track's peak (walking away)."""
@@ -787,33 +827,46 @@ class PersonCaptureService:
                 self.track_meta[tid] = meta
 
             saved = False
+            receding = False
             if should_sample:
-                receding = self._is_receding(tid, box_area, max(peak_area, box_area))
-                staging_dir = self._staging_dir(tid, gen=staging_gen)
-                os.makedirs(staging_dir, exist_ok=True)
-                # Copy once for the writer thread only
-                saved = self._store_sample(
-                    tid,
-                    staging_gen,
-                    staging_dir,
-                    frame_num,
-                    person_bbox,
-                    box_area,
-                    clean_frame.copy(),
-                    receding=receding,
-                )
-                with self._meta_lock:
-                    meta = self.track_meta.get(tid)
-                    if meta:
-                        max_area = (
-                            max(meta.get("samples", {}).values())
-                            if meta.get("samples")
-                            else 0
-                        )
-                        if max_area > meta.get("peak_buffer_area", 0):
-                            meta["peak_buffer_area"] = max_area
-                            meta["peak_area_time"] = now
-                        meta["last_bbox"] = person_bbox
+                # Use stored peak only — do not inflate with current area or
+                # walking-away can never trip until the next frame.
+                receding = self._is_receding(tid, box_area, peak_area)
+                if receding and self.skip_store_when_receding:
+                    with self._meta_lock:
+                        if tid in self.track_meta:
+                            self.track_meta[tid]["last_bbox"] = person_bbox
+                            self.track_meta[tid]["receding"] = True
+                else:
+                    staging_dir = self._staging_dir(tid, gen=staging_gen)
+                    os.makedirs(staging_dir, exist_ok=True)
+                    # Copy once for the writer thread only
+                    saved = self._store_sample(
+                        tid,
+                        staging_gen,
+                        staging_dir,
+                        frame_num,
+                        person_bbox,
+                        box_area,
+                        clean_frame.copy(),
+                        receding=receding,
+                    )
+                    with self._meta_lock:
+                        meta = self.track_meta.get(tid)
+                        if meta:
+                            max_area = (
+                                max(meta.get("samples", {}).values())
+                                if meta.get("samples")
+                                else 0
+                            )
+                            if box_area > meta.get("peak_buffer_area", 0):
+                                meta["peak_buffer_area"] = box_area
+                                meta["peak_area_time"] = now
+                            elif max_area > meta.get("peak_buffer_area", 0):
+                                meta["peak_buffer_area"] = max_area
+                                meta["peak_area_time"] = now
+                            meta["last_bbox"] = person_bbox
+                            meta["receding"] = bool(receding)
             else:
                 with self._meta_lock:
                     if tid in self.track_meta:
@@ -821,10 +874,18 @@ class PersonCaptureService:
 
             if draw is None:
                 draw = clean_frame.copy()
-            color = (0, 200, 0) if saved or not should_sample else (0, 180, 255)
+            if receding:
+                color = (180, 180, 40)  # cyan-ish: walking away, not sampling
+                label = f"ID:{tid} away"
+            elif saved or not should_sample:
+                color = (0, 200, 0)
+                label = f"ID:{tid}"
+            else:
+                color = (0, 180, 255)
+                label = f"ID:{tid}"
             cv2.rectangle(draw, (x1, y1), (x2, y2), color, 2)
             cv2.putText(
-                draw, f"ID:{tid}", (x1, y1 - 8),
+                draw, label, (x1, y1 - 8),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2,
             )
 
@@ -1002,12 +1063,27 @@ def main():
     )
     args = parser.parse_args()
 
-    # Prefer env so Windows cmd does not strip '&' from RTSP query strings
-    video_source = (
-        os.environ.get("CAPTURE_SOURCE", "").strip()
-        or args.video_source
-        or r"test_videos\Knowns.mp4"
-    )
+    # 1) CAMERA_ID -> cameras.json (UI edits apply on restart)
+    # 2) CAPTURE_SOURCE env (legacy / one-off)
+    # 3) cameras.json gate_in
+    video_source = None
+    camera_id = os.environ.get("CAMERA_ID", "").strip()
+    if camera_id:
+        try:
+            from camera_config import capture_source_for
+
+            video_source = capture_source_for(camera_id)
+        except Exception as e:
+            print(f"Warning: cameras.json lookup failed for {camera_id}: {e}")
+    if not video_source:
+        video_source = os.environ.get("CAPTURE_SOURCE", "").strip() or args.video_source
+    if not video_source:
+        try:
+            from camera_config import capture_source_for
+
+            video_source = capture_source_for("gate_in")
+        except Exception:
+            video_source = "rtsp://office:office123@192.170.1.129/stream1:270"
 
     if not is_valid_video_source(video_source):
         print(f"Invalid source: {video_source}")
